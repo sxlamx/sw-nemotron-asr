@@ -1,0 +1,673 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AuraNemotron - ASR & Speaker ID</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Space+Grotesk:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0b0c10;
+            --card-bg: rgba(22, 26, 35, 0.65);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --primary-color: #00f2fe;
+            --primary-glow: rgba(0, 242, 254, 0.25);
+            --secondary-color: #4facfe;
+            --accent-color: #f35588;
+            --text-color: #f3f4f6;
+            --text-muted: #9ca3af;
+            --success-color: #00e676;
+            --font-main: 'Outfit', sans-serif;
+            --font-mono: 'Space Grotesk', sans-serif;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: var(--font-main);
+            min-height: 100vh;
+            overflow-x: hidden;
+            background-image: 
+                radial-gradient(circle at 10% 20%, rgba(0, 242, 254, 0.05) 0%, transparent 40%),
+                radial-gradient(circle at 90% 80%, rgba(243, 85, 136, 0.05) 0%, transparent 40%);
+            background-attachment: fixed;
+        }
+
+        header {
+            padding: 2rem 4rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border-color);
+            background: rgba(11, 12, 16, 0.8);
+            backdrop-filter: blur(12px);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            font-weight: 800;
+            font-size: 1.5rem;
+            letter-spacing: 1px;
+            background: linear-gradient(to right, var(--primary-color), var(--secondary-color));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-family: var(--font-mono);
+        }
+
+        .logo-dot {
+            width: 10px;
+            height: 10px;
+            background-color: var(--primary-color);
+            border-radius: 50%;
+            box-shadow: 0 0 12px var(--primary-color);
+            display: inline-block;
+            animation: pulse-glow 2s infinite;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 2rem auto;
+            padding: 0 2rem;
+            display: grid;
+            grid-template-columns: 1.2fr 0.8fr;
+            gap: 2rem;
+        }
+
+        @media (max-width: 1024px) {
+            .container {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 20px;
+            padding: 2rem;
+            backdrop-filter: blur(16px);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .card:hover {
+            box-shadow: 0 15px 40px rgba(0, 242, 254, 0.05);
+        }
+
+        h2 {
+            font-size: 1.5rem;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-weight: 600;
+            border-left: 4px solid var(--primary-color);
+            padding-left: 0.75rem;
+        }
+
+        .record-section {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 3rem 1.5rem;
+            text-align: center;
+        }
+
+        .record-btn-container {
+            position: relative;
+            margin-bottom: 2rem;
+        }
+
+        .record-btn {
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            border: none;
+            cursor: pointer;
+            outline: none;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 8px 32px var(--primary-glow);
+            transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            z-index: 2;
+            position: relative;
+        }
+
+        .record-btn svg {
+            width: 48px;
+            height: 48px;
+            fill: #0b0c10;
+            transition: transform 0.3s ease;
+        }
+
+        .record-btn:hover {
+            transform: scale(1.08);
+            box-shadow: 0 12px 40px rgba(0, 242, 254, 0.4);
+        }
+
+        .record-btn:active {
+            transform: scale(0.95);
+        }
+
+        .record-btn.recording {
+            background: linear-gradient(135deg, var(--accent-color), #ff758c);
+            box-shadow: 0 8px 32px rgba(243, 85, 136, 0.4);
+        }
+
+        .record-btn.recording svg {
+            transform: scale(0.9);
+            fill: #0b0c10;
+        }
+
+        .ripple {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            border-radius: 50%;
+            border: 2px solid var(--primary-color);
+            opacity: 0;
+            animation: ripple-effect 1.5s linear infinite;
+            z-index: 1;
+            pointer-events: none;
+        }
+
+        .record-btn.recording ~ .ripple {
+            border-color: var(--accent-color);
+            animation: ripple-effect 1.2s linear infinite;
+        }
+
+        .ripple-2 {
+            animation-delay: 0.6s;
+        }
+
+        .status-badge {
+            padding: 0.5rem 1.25rem;
+            border-radius: 30px;
+            font-size: 0.875rem;
+            font-weight: 600;
+            font-family: var(--font-mono);
+            letter-spacing: 0.5px;
+            margin-bottom: 1.5rem;
+            border: 1px solid var(--border-color);
+            background: rgba(255, 255, 255, 0.03);
+            text-transform: uppercase;
+        }
+
+        .status-badge.recording {
+            color: var(--accent-color);
+            border-color: rgba(243, 85, 136, 0.3);
+            background: rgba(243, 85, 136, 0.05);
+        }
+
+        .status-badge.processing {
+            color: var(--primary-color);
+            border-color: rgba(0, 242, 254, 0.3);
+            background: rgba(0, 242, 254, 0.05);
+            animation: pulse-border 1.5s infinite;
+        }
+
+        .status-badge.idle {
+            color: var(--text-muted);
+        }
+
+        #visualizer {
+            width: 100%;
+            height: 100px;
+            margin-bottom: 2rem;
+            border-radius: 12px;
+            background: rgba(0, 0, 0, 0.15);
+        }
+
+        .form-group {
+            margin-bottom: 1.25rem;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-size: 0.875rem;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .form-control {
+            width: 100%;
+            padding: 0.8rem 1rem;
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            color: var(--text-color);
+            font-family: var(--font-main);
+            font-size: 0.95rem;
+            transition: all 0.3s ease;
+        }
+
+        .form-control:focus {
+            outline: none;
+            border-color: var(--primary-color);
+            box-shadow: 0 0 10px var(--primary-glow);
+            background: rgba(255, 255, 255, 0.06);
+        }
+
+        .btn {
+            padding: 0.8rem 1.5rem;
+            border-radius: 10px;
+            font-family: var(--font-main);
+            font-weight: 600;
+            font-size: 0.95rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            border: none;
+        }
+
+        .btn-primary {
+            background: linear-gradient(to right, var(--primary-color), var(--secondary-color));
+            color: #0b0c10;
+            box-shadow: 0 4px 15px var(--primary-glow);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0, 242, 254, 0.4);
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid var(--border-color);
+            color: var(--text-color);
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.15);
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none !important;
+            box-shadow: none !important;
+        }
+
+        .grid-forms {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+        }
+
+        @media (max-width: 640px) {
+            .grid-forms {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* Results Display */
+        .result-box {
+            margin-top: 2rem;
+            padding: 1.5rem;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 12px;
+            border: 1px solid var(--border-color);
+            display: none;
+        }
+
+        .result-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+            padding-bottom: 0.75rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .speaker-badge {
+            background: linear-gradient(to right, var(--primary-color), var(--secondary-color));
+            color: #0b0c10;
+            padding: 0.4rem 0.8rem;
+            border-radius: 6px;
+            font-weight: 700;
+            font-size: 0.9rem;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+
+        .speaker-badge.unknown {
+            background: rgba(255, 255, 255, 0.1);
+            color: var(--text-muted);
+        }
+
+        .result-meta {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            font-family: var(--font-mono);
+        }
+
+        .transcript-text {
+            font-size: 1.1rem;
+            line-height: 1.6;
+            margin-top: 0.5rem;
+            white-space: pre-wrap;
+            border-left: 3px solid var(--secondary-color);
+            padding-left: 1rem;
+        }
+
+        .aliases-list {
+            margin-top: 0.75rem;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+
+        .aliases-list span {
+            background: rgba(255, 255, 255, 0.05);
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            margin-right: 0.4rem;
+            display: inline-block;
+            margin-top: 0.2rem;
+        }
+
+        /* Speaker Table */
+        .speaker-table-container {
+            margin-top: 1.5rem;
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+        }
+
+        th, td {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        th {
+            font-weight: 600;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            font-family: var(--font-mono);
+        }
+
+        td {
+            font-size: 0.95rem;
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        .table-actions {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .action-btn {
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            color: var(--text-muted);
+            padding: 0.25rem;
+            border-radius: 4px;
+            transition: all 0.2s ease;
+        }
+
+        .action-btn:hover {
+            color: var(--primary-color);
+            background: rgba(0, 242, 254, 0.05);
+        }
+
+        .action-btn.delete:hover {
+            color: var(--accent-color);
+            background: rgba(243, 85, 136, 0.05);
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(8px);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-content {
+            background: var(--bg-color);
+            border: 1px solid var(--border-color);
+            border-radius: 20px;
+            width: 450px;
+            max-width: 90%;
+            padding: 2rem;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+            animation: scale-up 0.3s ease;
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+        }
+
+        .modal-close {
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            color: var(--text-muted);
+            font-size: 1.5rem;
+        }
+
+        .modal-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 0.75rem;
+            margin-top: 1.5rem;
+        }
+
+        /* Animations */
+        @keyframes ripple-effect {
+            0% {
+                transform: scale(1);
+                opacity: 0.5;
+            }
+            100% {
+                transform: scale(1.4);
+                opacity: 0;
+            }
+        }
+
+        @keyframes pulse-glow {
+            0%, 100% {
+                transform: scale(1);
+                box-shadow: 0 0 12px var(--primary-color);
+            }
+            50% {
+                transform: scale(1.2);
+                box-shadow: 0 0 20px var(--primary-color), 0 0 30px var(--secondary-color);
+            }
+        }
+
+        @keyframes pulse-border {
+            0%, 100% {
+                border-color: rgba(0, 242, 254, 0.3);
+            }
+            50% {
+                border-color: rgba(0, 242, 254, 0.8);
+            }
+        }
+
+        @keyframes scale-up {
+            0% {
+                transform: scale(0.95);
+                opacity: 0;
+            }
+            100% {
+                transform: scale(1);
+                opacity: 1;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="logo">
+            <span class="logo-dot"></span> AuraNemotron
+        </div>
+        <div style="font-family: var(--font-mono); font-size: 0.9rem; color: var(--text-muted);">
+            PORT 3007
+        </div>
+    </header>
+
+    <div class="container">
+        <!-- Main Recording & Transcription Panel -->
+        <div class="card">
+            <h2>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-mic"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>
+                ASR Transcription
+            </h2>
+
+            <div class="record-section">
+                <div class="status-badge idle" id="rec-status">Idle</div>
+                
+                <div class="record-btn-container">
+                    <button class="record-btn" id="record-trigger" title="Start Recording">
+                        <svg viewBox="0 0 24 24" id="mic-icon">
+                            <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z"/>
+                        </svg>
+                        <svg viewBox="0 0 24 24" id="stop-icon" style="display:none;">
+                            <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>
+                        </svg>
+                    </button>
+                    <div class="ripple"></div>
+                    <div class="ripple ripple-2"></div>
+                </div>
+
+                <canvas id="visualizer"></canvas>
+                
+                <div id="recording-time" style="font-family: var(--font-mono); font-size: 1.1rem; margin-bottom: 1rem; color: var(--text-muted); display:none;">00:00</div>
+            </div>
+
+            <!-- Transcription Result Display -->
+            <div class="result-box" id="transcription-result">
+                <div class="result-header">
+                    <span class="speaker-badge" id="res-speaker">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-user"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                        <span id="res-speaker-name">Unknown</span>
+                    </span>
+                    <span class="result-meta" id="res-meta">Session ID: -</span>
+                </div>
+                <div class="transcript-text" id="res-text">
+                    Transcription text will appear here...
+                </div>
+                <div class="aliases-list" id="res-aliases" style="display:none;">
+                    <strong>Aliases:</strong> <span id="res-aliases-list"></span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Speaker Profiles Management Panel -->
+        <div class="card">
+            <h2>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-users"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+                Speaker Verification Profiles
+            </h2>
+
+            <form id="enroll-form" style="margin-top: 1rem;">
+                <div class="form-group">
+                    <label for="speaker-id">Speaker ID (Unique, lowercase alphanumeric)</label>
+                    <input type="text" id="speaker-id" class="form-control" placeholder="e.g. alice" required pattern="[a-z0-9_]+">
+                </div>
+                <div class="grid-forms">
+                    <div class="form-group">
+                        <label for="speaker-name">Display Name</label>
+                        <input type="text" id="speaker-name" class="form-control" placeholder="e.g. Alice Smith" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="speaker-aliases">Aliases (Comma separated)</label>
+                        <input type="text" id="speaker-aliases" class="form-control" placeholder="e.g. Alice, Manager">
+                    </div>
+                </div>
+                
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-top: 1rem; gap: 1rem;">
+                    <div id="enroll-mic-status" style="font-size:0.85rem; color:var(--text-muted); font-family:var(--font-mono);">
+                        WAV format (16kHz mono)
+                    </div>
+                    <button type="button" class="btn btn-primary" id="enroll-btn">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-plus-circle"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="16"></line><line x1="8" y1="12" x2="16" y2="12"></line></svg>
+                        Record & Register Profile
+                    </button>
+                </div>
+            </form>
+
+            <div class="speaker-table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Speaker ID</th>
+                            <th>Display Name</th>
+                            <th>Aliases</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="speaker-table-body">
+                        <!-- Speakers list will be populated here -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit Aliases Modal -->
+    <div class="modal" id="edit-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 style="font-weight: 600;">Edit Speaker Profile</h3>
+                <button class="modal-close" id="modal-close-btn">&times;</button>
+            </div>
+            <div class="form-group">
+                <label for="modal-display-name">Display Name</label>
+                <input type="text" id="modal-display-name" class="form-control">
+            </div>
+            <div class="form-group">
+                <label for="modal-aliases">Aliases (Comma separated)</label>
+                <input type="text" id="modal-aliases" class="form-control">
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-secondary" id="modal-cancel-btn">Cancel</button>
+                <button class="btn btn-primary" id="modal-save-btn">Save Changes</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

@@ -135,7 +135,7 @@ function startVisualizer() {
     if (animationFrameId) {
         cancelAnimationFrame(animationFrameId);
     }
-    analyserNode.fftSize = 254;
+    analyserNode.fftSize = 256;
     const bufferLength = analyserNode.frequencyBinCount;
     const dataArray = new Uint8Array(bufferLength);
 

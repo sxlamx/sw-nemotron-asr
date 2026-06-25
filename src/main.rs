@@ -1,3 +1,4 @@
+use chrono::Local;
 use axum::{
     extract::{DefaultBodyLimit, Multipart, State},
     http::{header, Method, StatusCode},
@@ -152,7 +153,8 @@ async fn transcribe_handler(
         return Err((StatusCode::BAD_REQUEST, "Missing audio file field".to_string()));
     }
 
-    let session_id = Uuid::new_v4().to_string();
+    let timestamp = Local::now().format("%Y-%m-%dT%H-%M-%S").to_string();
+    let session_id = format!("{}_{}", timestamp, Uuid::new_v4());
     let session_dir = format!("data/sessions/{}", session_id);
     std::fs::create_dir_all(&session_dir)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -187,6 +189,8 @@ async fn transcribe_handler(
             }
         }
     };
+
+    let _ = std::fs::write(format!("{}/speaker.txt", session_dir), &speaker_id);
 
     println!("POST /api/transcribe -> session={} speaker={} transcript={:?}",
         session_id, speaker_id, transcript_trimmed);

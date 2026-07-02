@@ -47,6 +47,17 @@ struct TranscribeResponse {
     session_id: String,
     transcript: String,
     speaker_id: String,
+    confidence: f64,
+}
+
+#[derive(Serialize)]
+struct SessionInfo {
+    session_id: String,
+    timestamp: String,
+    transcript: String,
+    speaker_id: String,
+    confidence: f64,
+    audio_url: String,
 }
 
 fn get_python_path() -> &'static str {
@@ -124,14 +135,70 @@ async fn main() {
         .route("/api/transcribe", post(transcribe_handler))
         .route("/api/speakers/enroll", post(enroll_handler))
         .route("/api/speakers/aliases", get(get_aliases_handler).post(update_aliases_handler))
+        .route("/api/sessions", get(get_sessions_handler))
         .layer(DefaultBodyLimit::max(20 * 1024 * 1024))
         .layer(cors)
+        .nest_service("/data", tower_http::services::ServeDir::new("data"))
         .nest_service("/", tower_http::services::ServeDir::new("static"))
         .with_state(shared_state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3007").await.unwrap();
     println!("AuraNemotron ASR backend is running on http://127.0.0.1:3007");
     axum::serve(listener, app).await.unwrap();
+}
+
+async fn get_sessions_handler() -> impl IntoResponse {
+    let mut sessions: Vec<SessionInfo> = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir("data/sessions") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Skip non-timestamped dirs (old UUID-only sessions)
+            if name.len() < 20 || name.chars().nth(19) != Some('_') {
+                continue;
+            }
+            if !entry.path().is_dir() {
+                continue;
+            }
+
+            // Parse "YYYY-MM-DDTHH-MM-SS" → "YYYY-MM-DDTHH:MM:SS" for display
+            let ts_raw = &name[..19];
+            let timestamp = format!(
+                "{}T{}:{}:{}",
+                &ts_raw[..10],
+                &ts_raw[11..13],
+                &ts_raw[14..16],
+                &ts_raw[17..19]
+            );
+
+            let transcript = std::fs::read_to_string(entry.path().join("transcript.txt"))
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let speaker_id = std::fs::read_to_string(entry.path().join("speaker.txt"))
+                .unwrap_or_else(|_| "Unknown".to_string())
+                .trim()
+                .to_string();
+            let confidence = std::fs::read_to_string(entry.path().join("confidence.txt"))
+                .unwrap_or_else(|_| "0.0".to_string())
+                .trim()
+                .parse::<f64>()
+                .unwrap_or(0.0);
+
+            sessions.push(SessionInfo {
+                audio_url: format!("/data/sessions/{}/audio.wav", name),
+                session_id: name,
+                timestamp,
+                transcript,
+                speaker_id,
+                confidence,
+            });
+        }
+    }
+
+    // Newest first
+    sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    Json(sessions)
 }
 
 async fn transcribe_handler(
@@ -171,30 +238,34 @@ async fn transcribe_handler(
     let transcript_trimmed = transcript.trim().to_string();
     let _ = std::fs::write(format!("{}/transcript.txt", session_dir), &transcript_trimmed);
 
-    let speaker_id = {
+    let (speaker_id, confidence) = {
         let mut worker = state.speaker_id.lock().await;
         match worker.send(&format!("identify {}\n", audio_path)).await {
             Ok(resp) => {
-                println!("Speaker ID: {}", resp);
+                println!("Speaker ID response: {}", resp);
                 if resp.starts_with("IDENTIFIED:") {
-                    resp.split(':').nth(1).unwrap_or("Unknown").to_string()
+                    let parts: Vec<&str> = resp.split(':').collect();
+                    let speaker = parts.get(1).unwrap_or(&"Unknown").to_string();
+                    let conf = parts.get(2).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                    (speaker, conf)
                 } else {
                     eprintln!("Speaker ID error: {}", resp);
-                    "Unknown".to_string()
+                    ("Unknown".to_string(), 0.0)
                 }
             }
             Err(e) => {
                 eprintln!("Speaker ID worker error: {}", e);
-                "Unknown".to_string()
+                ("Unknown".to_string(), 0.0)
             }
         }
     };
 
     let _ = std::fs::write(format!("{}/speaker.txt", session_dir), &speaker_id);
+    let _ = std::fs::write(format!("{}/confidence.txt", session_dir), confidence.to_string());
 
-    println!("POST /api/transcribe -> session={} speaker={} transcript={:?}",
-        session_id, speaker_id, transcript_trimmed);
-    Ok(Json(TranscribeResponse { session_id, transcript: transcript_trimmed, speaker_id }))
+    println!("POST /api/transcribe -> session={} speaker={} confidence={} transcript={:?}",
+        session_id, speaker_id, confidence, transcript_trimmed);
+    Ok(Json(TranscribeResponse { session_id, transcript: transcript_trimmed, speaker_id, confidence }))
 }
 
 async fn enroll_handler(

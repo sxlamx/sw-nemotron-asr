@@ -26,6 +26,7 @@ const resSpeakerName = document.getElementById('res-speaker-name');
 const resMeta = document.getElementById('res-meta');
 const resText = document.getElementById('res-text');
 const resSpeakerBadge = document.getElementById('res-speaker');
+const resSpeakerConfidence = document.getElementById('res-speaker-confidence');
 const resAliases = document.getElementById('res-aliases');
 const resAliasesList = document.getElementById('res-aliases-list');
 
@@ -396,6 +397,14 @@ function displayResult(data) {
         resSpeakerName.innerText = speakerId === "Unknown" ? "Unknown Speaker" : (speakerId || "Unknown Speaker");
         resSpeakerBadge.className = "speaker-badge unknown";
         resAliases.style.display = 'none';
+    }
+
+    // Render speaker ID confidence
+    if (data.confidence && data.confidence > 0) {
+        resSpeakerConfidence.innerText = `${(data.confidence * 100).toFixed(1)}%`;
+        resSpeakerConfidence.style.display = 'inline-block';
+    } else {
+        resSpeakerConfidence.style.display = 'none';
     }
 
     resultBox.style.display = 'block';

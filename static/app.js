@@ -47,6 +47,17 @@ const modalCancelBtn = document.getElementById('modal-cancel-btn');
 const modalSaveBtn = document.getElementById('modal-save-btn');
 let editingSpeakerId = null;
 
+// Settings & Recordings UI Elements
+const recordingsTableBody = document.getElementById('recordings-table-body');
+const sessionAudio = document.getElementById('session-audio');
+const refreshSessionsBtn = document.getElementById('refresh-sessions-btn');
+const saveSettingsBtn = document.getElementById('save-settings-btn');
+const settingCuratedFolder = document.getElementById('setting-curated-folder');
+const settingMinSamples = document.getElementById('setting-min-samples');
+const settingMaxSamples = document.getElementById('setting-max-samples');
+const settingsStatus = document.getElementById('settings-status');
+const enrollSampleCount = document.getElementById('enroll-sample-count');
+
 // Cache of speakers and aliases
 let speakerAliasesMap = {};
 
@@ -61,6 +72,8 @@ resizeCanvas();
 // Initial page load: retrieve speaker database
 document.addEventListener('DOMContentLoaded', () => {
     fetchSpeakers();
+    fetchSettings();
+    fetchSessions();
     drawVisualizerIdle();
 });
 
@@ -360,6 +373,7 @@ async function uploadAndTranscribe(blob) {
         if (response.ok) {
             const data = await response.json();
             displayResult(data);
+            fetchSessions();
         } else {
             const errText = await response.text();
             alert('Error from transcription API: ' + errText);
@@ -520,6 +534,7 @@ function resetEnrollUI() {
     speakerIdInput.value = '';
     speakerNameInput.value = '';
     speakerAliasesInput.value = '';
+    if (enrollSampleCount) enrollSampleCount.textContent = '';
 }
 
 // Send profile request to API
@@ -537,7 +552,11 @@ async function registerSpeakerProfile(id, name, aliases, audioBlob) {
         });
 
         if (response.ok) {
-            alert(`Speaker profile '${name}' registered successfully!`);
+            const data = await response.json();
+            const count = data.sample_count || 0;
+            if (enrollSampleCount) {
+                enrollSampleCount.textContent = `Sample ${count} enrolled — record again to add more`;
+            }
         } else {
             const errText = await response.text();
             alert('Failed to register speaker: ' + errText);
@@ -547,6 +566,133 @@ async function registerSpeakerProfile(id, name, aliases, audioBlob) {
         alert('Network error enrolling speaker.');
     }
 }
+
+// Settings functions
+async function fetchSettings() {
+    try {
+        const res = await fetch('/api/settings');
+        if (res.ok) {
+            const s = await res.json();
+            settingCuratedFolder.value = s.curated_audio_folder;
+            settingMinSamples.value = s.min_enrollment_samples;
+            settingMaxSamples.value = s.max_enrollment_samples;
+        }
+    } catch (err) {
+        console.error('Error fetching settings:', err);
+    }
+}
+
+saveSettingsBtn.addEventListener('click', async () => {
+    const patch = {
+        curated_audio_folder: settingCuratedFolder.value.trim(),
+        min_enrollment_samples: parseInt(settingMinSamples.value, 10),
+        max_enrollment_samples: parseInt(settingMaxSamples.value, 10),
+    };
+    try {
+        const res = await fetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(patch)
+        });
+        if (res.ok) {
+            settingsStatus.innerText = 'Settings saved.';
+            settingsStatus.style.color = 'var(--success-color)';
+        } else {
+            settingsStatus.innerText = 'Failed to save settings.';
+            settingsStatus.style.color = 'var(--accent-color)';
+        }
+    } catch (err) {
+        settingsStatus.innerText = 'Network error.';
+        settingsStatus.style.color = 'var(--accent-color)';
+    }
+    setTimeout(() => { settingsStatus.innerText = ''; }, 3000);
+});
+
+refreshSessionsBtn.addEventListener('click', fetchSessions);
+
+// Sessions / Recordings functions
+async function fetchSessions() {
+    try {
+        const res = await fetch('/api/sessions');
+        if (res.ok) {
+            const sessions = await res.json();
+            populateRecordingsTable(sessions);
+        }
+    } catch (err) {
+        console.error('Error fetching sessions:', err);
+    }
+}
+
+function populateRecordingsTable(sessions) {
+    recordingsTableBody.innerHTML = '';
+    if (!sessions || sessions.length === 0) {
+        recordingsTableBody.innerHTML = `<tr><td colspan="5" style="text-align:center; color:var(--text-muted);">No recordings yet.</td></tr>`;
+        return;
+    }
+    sessions.forEach(s => {
+        const row = document.createElement('tr');
+        row.id = `session-row-${s.session_id}`;
+        const ts = s.timestamp ? s.timestamp.replace('T', ' ') : '-';
+        const conf = s.confidence > 0 ? `${(s.confidence * 100).toFixed(1)}%` : '-';
+        const speakerDisplay = s.speaker_id && s.speaker_id !== 'Unknown'
+            ? `<span style="color:var(--primary-color); font-family:var(--font-mono); font-size:0.85rem;">${escapeHtml(s.speaker_id)}</span>`
+            : `<span style="color:var(--text-muted);">Unknown</span>`;
+
+        const confirmBtn = s.speaker_id && s.speaker_id !== 'Unknown'
+            ? s.confirmed
+                ? `<button class="action-btn confirmed" title="Already confirmed" disabled>
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                  </button>`
+                : `<button class="action-btn confirm" title="Confirm speaker &amp; add to training" onclick="confirmSession('${escapeHtml(s.session_id)}')">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                  </button>`
+            : '';
+
+        row.innerHTML = `
+            <td style="font-family:var(--font-mono); font-size:0.8rem; white-space:nowrap;">${escapeHtml(ts)}</td>
+            <td>${speakerDisplay}</td>
+            <td class="transcript-cell" title="${escapeHtml(s.transcript)}">${escapeHtml(s.transcript) || '<em style="color:var(--text-muted);">—</em>'}</td>
+            <td style="font-family:var(--font-mono); font-size:0.85rem;">${conf}</td>
+            <td class="table-actions">
+                <button class="action-btn" title="Play" onclick="playSession('${escapeHtml(s.audio_url)}')">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                </button>
+                ${confirmBtn}
+            </td>
+        `;
+        recordingsTableBody.appendChild(row);
+    });
+}
+
+function playSession(audioUrl) {
+    sessionAudio.src = audioUrl;
+    sessionAudio.style.display = 'block';
+    sessionAudio.play();
+}
+
+window.confirmSession = async function(sessionId) {
+    try {
+        const response = await fetch(`/api/sessions/${sessionId}/confirm`, { method: 'POST' });
+        if (response.ok) {
+            const data = await response.json();
+            const row = document.getElementById(`session-row-${sessionId}`);
+            if (row) {
+                const confirmBtn = row.querySelector('.action-btn.confirm');
+                if (confirmBtn) {
+                    confirmBtn.className = 'action-btn confirmed';
+                    confirmBtn.disabled = true;
+                    confirmBtn.title = `Confirmed — sample count: ${data.sample_count}`;
+                }
+            }
+        } else {
+            const errText = await response.text();
+            alert('Failed to confirm session: ' + errText);
+        }
+    } catch (err) {
+        console.error('Confirm session error:', err);
+        alert('Network error confirming session.');
+    }
+};
 
 // Modal handling
 window.openEditModal = function(id) {

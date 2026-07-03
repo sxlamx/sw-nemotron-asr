@@ -535,6 +535,126 @@
                 opacity: 1;
             }
         }
+
+        .container-full {
+            max-width: 1400px;
+            margin: 0 auto 2rem;
+            padding: 0 2rem;
+        }
+
+        .settings-grid {
+            display: grid;
+            grid-template-columns: 2fr 1fr 1fr auto;
+            gap: 1rem;
+            align-items: end;
+            margin-top: 1rem;
+        }
+
+        @media (max-width: 900px) {
+            .settings-grid { grid-template-columns: 1fr 1fr; }
+        }
+        @media (max-width: 600px) {
+            .settings-grid { grid-template-columns: 1fr; }
+        }
+
+        .enroll-progress {
+            font-size: 0.82rem;
+            color: var(--primary-color);
+            font-family: var(--font-mono);
+            margin-top: 0.4rem;
+            min-height: 1.2em;
+        }
+
+        .recordings-table-container {
+            margin-top: 1rem;
+            overflow-x: auto;
+        }
+
+        .recordings-audio-player {
+            width: 100%;
+            margin-bottom: 1rem;
+            display: none;
+            accent-color: var(--primary-color);
+        }
+
+        .confirm-btn {
+            background: transparent;
+            border: 1px solid rgba(0, 230, 118, 0.3);
+            color: var(--success-color);
+            padding: 0.25rem 0.6rem;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            white-space: nowrap;
+        }
+
+        .confirm-btn:hover {
+            background: rgba(0, 230, 118, 0.1);
+            border-color: var(--success-color);
+        }
+
+        .confirm-btn.confirmed {
+            color: var(--text-muted);
+            border-color: var(--border-color);
+            cursor: default;
+        }
+
+        .play-btn {
+            background: transparent;
+            border: none;
+            color: var(--secondary-color);
+            cursor: pointer;
+            padding: 0.25rem;
+            border-radius: 4px;
+            transition: all 0.2s ease;
+        }
+
+        .play-btn:hover {
+            color: var(--primary-color);
+            background: rgba(0, 242, 254, 0.05);
+        }
+
+        /* Recordings panel */
+        .recordings-table td {
+            font-size: 0.9rem;
+            vertical-align: middle;
+            max-width: 320px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .recordings-table .transcript-cell {
+            max-width: 320px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: var(--text-muted);
+        }
+
+        .action-btn.confirm {
+            color: var(--success-color);
+        }
+
+        .action-btn.confirm:hover {
+            background: rgba(0, 230, 118, 0.08);
+        }
+
+        .action-btn.confirmed {
+            color: var(--text-muted);
+            cursor: default;
+            opacity: 0.5;
+        }
+
+        /* Enrollment sample count */
+        .enroll-sample-count {
+            font-size: 0.8rem;
+            color: var(--primary-color);
+            font-family: var(--font-mono);
+            margin-top: 0.4rem;
+            min-height: 1.2em;
+        }
     </style>
 </head>
 <body>
@@ -627,6 +747,7 @@
                         Record & Register Profile
                     </button>
                 </div>
+                <div id="enroll-sample-count" class="enroll-sample-count"></div>
             </form>
 
             <div class="speaker-table-container">
@@ -641,6 +762,63 @@
                     </thead>
                     <tbody id="speaker-table-body">
                         <!-- Speakers list will be populated here -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="container-full">
+        <!-- Settings Card -->
+        <div class="card" style="margin-bottom: 2rem;">
+            <h2>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                Settings
+            </h2>
+            <div class="settings-grid">
+                <div class="form-group" style="margin-bottom:0;">
+                    <label for="setting-curated-folder">Curated Audio Folder</label>
+                    <input type="text" id="setting-curated-folder" class="form-control" placeholder="data/curated">
+                </div>
+                <div class="form-group" style="margin-bottom:0;">
+                    <label for="setting-min-samples">Min Enrollment Samples</label>
+                    <input type="number" id="setting-min-samples" class="form-control" min="1" max="20" placeholder="3">
+                </div>
+                <div class="form-group" style="margin-bottom:0;">
+                    <label for="setting-max-samples">Max Enrollment Samples</label>
+                    <input type="number" id="setting-max-samples" class="form-control" min="1" max="50" placeholder="10">
+                </div>
+                <button class="btn btn-primary" id="save-settings-btn" style="white-space:nowrap;">Save Settings</button>
+            </div>
+            <div id="settings-status" style="margin-top:0.75rem; font-size:0.82rem; color:var(--text-muted); font-family:var(--font-mono); min-height:1.2em;"></div>
+        </div>
+
+        <!-- Recordings Card -->
+        <div class="card">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
+                <h2 style="margin-bottom:0; border-left-color: var(--secondary-color);">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>
+                    Recordings
+                </h2>
+                <button class="btn btn-secondary" id="refresh-sessions-btn" style="padding:0.5rem 1rem; font-size:0.85rem;">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+                    Refresh
+                </button>
+            </div>
+            <audio id="session-audio" class="recordings-audio-player" controls></audio>
+            <div class="recordings-table-container">
+                <table class="recordings-table">
+                    <thead>
+                        <tr>
+                            <th>Timestamp</th>
+                            <th>Speaker</th>
+                            <th>Transcript</th>
+                            <th>Confidence</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="recordings-table-body">
+                        <tr><td colspan="5" style="text-align:center; color:var(--text-muted);">No recordings yet.</td></tr>
                     </tbody>
                 </table>
             </div>

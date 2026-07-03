@@ -220,3 +220,6 @@ __marimo__/
 # AuraNemotron local files
 models/
 data/
+
+# Git worktrees
+.worktrees/

@@ -104,11 +104,11 @@ function populateSpeakerTable() {
         const info = speakerAliasesMap[id];
         const row = document.createElement('tr');
         row.innerHTML = `
-            <td style="font-family: var(--font-mono); font-weight: 600;">${id}</td>
+            <td style="font-family: var(--font-mono); font-weight: 600;">${escapeHtml(id)}</td>
             <td>${escapeHtml(info.name)}</td>
             <td>${info.aliases.map(a => `<span style="background: rgba(255,255,255,0.05); padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.8rem; margin-right: 0.3rem;">${escapeHtml(a)}</span>`).join('')}</td>
             <td class="table-actions">
-                <button class="action-btn" title="Edit Aliases" onclick="openEditModal('${id}')">
+                <button class="action-btn" title="Edit Aliases" onclick="openEditModal(${JSON.stringify(id)})">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
                 </button>
             </td>
@@ -588,6 +588,14 @@ saveSettingsBtn.addEventListener('click', async () => {
         min_enrollment_samples: parseInt(settingMinSamples.value, 10),
         max_enrollment_samples: parseInt(settingMaxSamples.value, 10),
     };
+    if (isNaN(patch.min_enrollment_samples) || isNaN(patch.max_enrollment_samples)
+        || patch.min_enrollment_samples < 1 || patch.max_enrollment_samples < 1
+        || patch.min_enrollment_samples >= patch.max_enrollment_samples) {
+        settingsStatus.textContent = 'Min must be ≥ 1 and less than Max.';
+        settingsStatus.style.color = 'var(--accent-color)';
+        setTimeout(() => { settingsStatus.textContent = ''; }, 3000);
+        return;
+    }
     try {
         const res = await fetch('/api/settings', {
             method: 'POST',
@@ -625,7 +633,7 @@ async function fetchSessions() {
 
 function populateRecordingsTable(sessions) {
     recordingsTableBody.innerHTML = '';
-    if (!sessions || sessions.length === 0) {
+    if (!sessions || !Array.isArray(sessions) || sessions.length === 0) {
         recordingsTableBody.innerHTML = `<tr><td colspan="5" style="text-align:center; color:var(--text-muted);">No recordings yet.</td></tr>`;
         return;
     }
@@ -643,7 +651,7 @@ function populateRecordingsTable(sessions) {
                 ? `<button class="action-btn confirmed" title="Already confirmed" disabled>
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
                   </button>`
-                : `<button class="action-btn confirm" title="Confirm speaker &amp; add to training" onclick="confirmSession('${escapeHtml(s.session_id)}')">
+                : `<button class="action-btn confirm" title="Confirm speaker &amp; add to training" onclick="confirmSession(${JSON.stringify(s.session_id)})">
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
                   </button>`
             : '';
@@ -654,7 +662,7 @@ function populateRecordingsTable(sessions) {
             <td class="transcript-cell" title="${escapeHtml(s.transcript)}">${escapeHtml(s.transcript) || '<em style="color:var(--text-muted);">—</em>'}</td>
             <td style="font-family:var(--font-mono); font-size:0.85rem;">${conf}</td>
             <td class="table-actions">
-                <button class="action-btn" title="Play" onclick="playSession('${escapeHtml(s.audio_url)}')">
+                <button class="action-btn" title="Play" onclick="playSession(${JSON.stringify(s.audio_url)})">
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
                 </button>
                 ${confirmBtn}
@@ -665,6 +673,7 @@ function populateRecordingsTable(sessions) {
 }
 
 function playSession(audioUrl) {
+    if (!audioUrl) return;
     sessionAudio.src = audioUrl;
     sessionAudio.style.display = 'block';
     sessionAudio.play();

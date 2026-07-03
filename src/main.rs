@@ -137,8 +137,8 @@ fn load_or_create_settings() -> AppSettings {
 }
 
 async fn scan_and_enroll_curated(worker: &mut SpeakerIdWorker, curated_folder: &str) {
-    let manifest_path = "data/curated/.enrolled";
-    let enrolled: std::collections::HashSet<String> = std::fs::read_to_string(manifest_path)
+    let manifest_path = format!("{}/.enrolled", curated_folder);
+    let enrolled: std::collections::HashSet<String> = std::fs::read_to_string(&manifest_path)
         .unwrap_or_default()
         .lines()
         .map(|l| l.to_string())
@@ -147,7 +147,7 @@ async fn scan_and_enroll_curated(worker: &mut SpeakerIdWorker, curated_folder: &
     let mut manifest_file = match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(manifest_path)
+        .open(&manifest_path)
     {
         Ok(f) => f,
         Err(e) => {
@@ -162,7 +162,7 @@ async fn scan_and_enroll_curated(worker: &mut SpeakerIdWorker, curated_folder: &
             let speaker_id = speaker_entry.file_name().to_string_lossy().to_string();
             if let Ok(wav_files) = std::fs::read_dir(speaker_entry.path()) {
                 for wav_entry in wav_files.flatten() {
-                    let wav_path = wav_entry.path().to_string_lossy().to_string();
+                    let wav_path = wav_entry.path().to_string_lossy().replace('\\', "/");
                     if !wav_path.ends_with(".wav") { continue; }
                     if enrolled.contains(&wav_path) { continue; }
                     let cmd = format!("enroll {} {}\n", speaker_id, wav_path);
@@ -398,6 +398,10 @@ async fn enroll_handler(
         return Err((StatusCode::BAD_REQUEST, "Missing required fields (audio, id, name)".to_string()));
     }
 
+    if !speaker_id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        return Err((StatusCode::BAD_REQUEST, "speaker_id may only contain alphanumeric characters, hyphens, and underscores".to_string()));
+    }
+
     let temp_path = format!("data/speakers/{}_temp.wav", speaker_id);
     std::fs::write(&temp_path, &audio_bytes)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -417,7 +421,7 @@ async fn enroll_handler(
     let sample_count = result
         .split(":count=")
         .nth(1)
-        .and_then(|s| s.parse::<usize>().ok())
+        .and_then(|s| s.split(':').next()?.parse::<usize>().ok())
         .unwrap_or(0);
 
     let aliases: Vec<String> = aliases_str
@@ -512,6 +516,10 @@ async fn confirm_session_handler(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
 ) -> Result<Json<EnrollResponse>, (StatusCode, String)> {
+    // Reject session_id containing anything other than alphanumeric, hyphen, underscore
+    if !session_id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        return Err((StatusCode::BAD_REQUEST, "Invalid session_id".to_string()));
+    }
     let session_dir = format!("data/sessions/{}", session_id);
     let speaker_id = std::fs::read_to_string(format!("{}/speaker.txt", session_dir))
         .map_err(|_| (StatusCode::NOT_FOUND, "Session not found".to_string()))?
@@ -532,8 +540,8 @@ async fn confirm_session_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Append to manifest
-    let manifest_path = "data/curated/.enrolled";
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(manifest_path) {
+    let manifest_path = format!("{}/.enrolled", curated_folder);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&manifest_path) {
         let _ = writeln!(f, "{}", dest);
     }
 
@@ -550,7 +558,7 @@ async fn confirm_session_handler(
     let sample_count = result
         .split(":count=")
         .nth(1)
-        .and_then(|s| s.parse::<usize>().ok())
+        .and_then(|s| s.split(':').next()?.parse::<usize>().ok())
         .unwrap_or(0);
 
     println!("Confirmed session {} → enrolled into speaker '{}'", session_id, speaker_id);

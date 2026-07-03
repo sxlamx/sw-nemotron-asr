@@ -1,5 +1,7 @@
 import sys
 import os
+import json
+import shutil
 import numpy as np
 import torch
 import soundfile as sf
@@ -8,6 +10,9 @@ from speechbrain.inference.speaker import EncoderClassifier
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_DIR = os.path.join(PROJECT_ROOT, "models", "speaker_id_model")
 SPEAKERS_DIR = os.path.join(PROJECT_ROOT, "data", "speakers")
+
+DEFAULT_MAX_SAMPLES = 10
+DEFAULT_MIN_SAMPLES = 3
 
 os.makedirs(SPEAKERS_DIR, exist_ok=True)
 
@@ -72,10 +77,10 @@ def get_embedding(audio_path):
     try:
         vad_model, utils = get_vad_model()
         get_speech_timestamps, _, _, _, collect_chunks = utils
-        
+
         # Get speech intervals
         speech_timestamps = get_speech_timestamps(signal_mono, vad_model, sampling_rate=16000)
-        
+
         if len(speech_timestamps) > 0:
             signal_mono = collect_chunks(speech_timestamps, signal_mono)
             print(f"VAD: Kept {signal_mono.shape[0]/16000:.2f}s of active speech.", file=sys.stderr, flush=True)
@@ -91,74 +96,141 @@ def get_embedding(audio_path):
     embeddings = get_classifier().encode_batch(signal_input)
     return embeddings.squeeze().cpu().numpy()
 
-def cmd_enroll(speaker_id, audio_path):
+def migrate_flat_embeddings():
+    for f in os.listdir(SPEAKERS_DIR):
+        full = os.path.join(SPEAKERS_DIR, f)
+        if os.path.isfile(full) and f.endswith(".npy"):
+            sid = f[:-4]
+            dest_dir = os.path.join(SPEAKERS_DIR, sid, "embeddings")
+            os.makedirs(dest_dir, exist_ok=True)
+            shutil.move(full, os.path.join(dest_dir, "001.npy"))
+            # Write a default threshold.json since we only have 1 sample
+            thresh_path = os.path.join(SPEAKERS_DIR, sid, "threshold.json")
+            if not os.path.exists(thresh_path):
+                with open(thresh_path, "w") as tf:
+                    json.dump({"threshold": 0.60, "sample_count": 1}, tf)
+            print(f"Migrated {f} → {sid}/embeddings/001.npy", file=sys.stderr, flush=True)
+
+def cmd_enroll(speaker_id, audio_path, max_samples=DEFAULT_MAX_SAMPLES):
     embedding = get_embedding(audio_path)
     if embedding is None:
         return "ERROR:No speech detected in enrollment audio."
-    
-    # L2 normalize the new embedding
+
+    # L2-normalize the new embedding
     norm_emb = np.linalg.norm(embedding)
     if norm_emb > 0:
         embedding = embedding / norm_emb
     else:
         return "ERROR:Zero magnitude embedding."
 
-    dest_path = os.path.join(SPEAKERS_DIR, f"{speaker_id}.npy")
-    if os.path.exists(dest_path):
-        try:
-            old_embedding = np.load(dest_path)
-            # L2 normalize old embedding to be safe
-            norm_old = np.linalg.norm(old_embedding)
-            if norm_old > 0:
-                old_embedding = old_embedding / norm_old
-            
-            # Weighted blend: 70% old, 30% new
-            blended = old_embedding * 0.7 + embedding * 0.3
-            norm_blended = np.linalg.norm(blended)
-            if norm_blended > 0:
-                embedding = blended / norm_blended
-            print(f"VAD/Enroll: Blended new embedding with existing profile for {speaker_id}.", file=sys.stderr, flush=True)
-        except Exception as e:
-            print(f"VAD/Enroll Warning: Failed to blend embeddings: {e}. Overwriting.", file=sys.stderr, flush=True)
+    # Create speaker embeddings directory if needed
+    emb_dir = os.path.join(SPEAKERS_DIR, speaker_id, "embeddings")
+    os.makedirs(emb_dir, exist_ok=True)
 
+    # List existing .npy files sorted by name
+    existing = sorted(f for f in os.listdir(emb_dir) if f.endswith(".npy"))
+
+    # Evict oldest sample if at capacity
+    if len(existing) >= max_samples:
+        oldest = os.path.join(emb_dir, existing[0])
+        os.remove(oldest)
+        existing = existing[1:]
+
+    # Determine next index
+    if existing:
+        last_index = max(int(os.path.splitext(f)[0]) for f in existing)
+        next_index = last_index + 1
+    else:
+        next_index = 1
+
+    dest_path = os.path.join(emb_dir, f"{next_index:03d}.npy")
     np.save(dest_path, embedding)
-    return f"SUCCESS:Enrolled {speaker_id}"
 
-def cmd_identify(audio_path):
+    # Reload all embeddings (including the new one) for threshold computation
+    all_files = sorted(f for f in os.listdir(emb_dir) if f.endswith(".npy"))
+    all_embeddings = [np.load(os.path.join(emb_dir, f)) for f in all_files]
+    n = len(all_embeddings)
+
+    if n == 1:
+        threshold = 0.60
+    else:
+        loo_scores = []
+        for i in range(n):
+            others = [all_embeddings[j] for j in range(n) if j != i]
+            sims = [float(np.dot(all_embeddings[i], other)) for other in others]
+            loo_scores.append(float(np.mean(sims)))
+        mean_loo = float(np.mean(loo_scores))
+        std_loo = float(np.std(loo_scores))
+        threshold = float(max(0.40, min(0.80, mean_loo - 1.5 * std_loo)))
+
+    thresh_path = os.path.join(SPEAKERS_DIR, speaker_id, "threshold.json")
+    with open(thresh_path, "w") as tf:
+        json.dump({"threshold": threshold, "sample_count": n}, tf)
+
+    return f"SUCCESS:Enrolled {speaker_id}:count={n}"
+
+def cmd_identify(audio_path, min_samples=DEFAULT_MIN_SAMPLES):
     test_emb = get_embedding(audio_path)
     if test_emb is None:
         return "IDENTIFIED:Unknown:0.0000"
-    
-    # L2 normalize test embedding to be safe
+
+    # L2-normalize the test embedding
     norm_test = np.linalg.norm(test_emb)
     if norm_test > 0:
         test_emb = test_emb / norm_test
 
     best_score = -1.0
-    best_speaker = "Unknown"
+    best_speaker = None
+    best_threshold = 0.0
 
-    for filename in os.listdir(SPEAKERS_DIR):
-        if not filename.endswith(".npy"):
+    for entry in os.listdir(SPEAKERS_DIR):
+        speaker_dir = os.path.join(SPEAKERS_DIR, entry)
+        if not os.path.isdir(speaker_dir):
             continue
-        sid = filename[:-4]
-        ref_emb = np.load(os.path.join(SPEAKERS_DIR, filename))
-        
-        # Normalize reference embedding
-        norm_ref = np.linalg.norm(ref_emb)
-        if norm_ref > 0:
-            ref_emb = ref_emb / norm_ref
-            
-        similarity = np.dot(test_emb, ref_emb)
-        if similarity > best_score:
-            best_score = similarity
-            best_speaker = sid
 
-    THRESHOLD = 0.6
-    tag = best_speaker if best_score >= THRESHOLD else "Unknown"
-    return f"IDENTIFIED:{tag}:{best_score:.4f}"
+        thresh_path = os.path.join(speaker_dir, "threshold.json")
+        if not os.path.exists(thresh_path):
+            continue
+
+        with open(thresh_path, "r") as tf:
+            thresh_data = json.load(tf)
+
+        if thresh_data.get("sample_count", 0) < min_samples:
+            continue
+
+        emb_dir = os.path.join(speaker_dir, "embeddings")
+        if not os.path.isdir(emb_dir):
+            continue
+
+        ref_files = [f for f in os.listdir(emb_dir) if f.endswith(".npy")]
+        if not ref_files:
+            continue
+
+        sims = []
+        for rf in ref_files:
+            ref_emb = np.load(os.path.join(emb_dir, rf))
+            norm_ref = np.linalg.norm(ref_emb)
+            if norm_ref > 0:
+                ref_emb = ref_emb / norm_ref
+            sims.append(float(np.dot(test_emb, ref_emb)))
+
+        speaker_score = float(np.mean(sims))
+        if speaker_score > best_score:
+            best_score = speaker_score
+            best_speaker = entry
+            best_threshold = float(thresh_data.get("threshold", 0.60))
+
+    if best_speaker is None:
+        return "IDENTIFIED:Unknown:0.0000"
+
+    if best_score >= best_threshold:
+        return f"IDENTIFIED:{best_speaker}:{best_score:.4f}"
+    else:
+        return f"IDENTIFIED:Unknown:{best_score:.4f}"
 
 def run_persistent():
     """Load model once, serve identify/enroll commands via stdin/stdout."""
+    migrate_flat_embeddings()
     get_classifier()
     print("READY", flush=True)
 
@@ -170,9 +242,9 @@ def run_persistent():
         cmd = parts[0]
         try:
             if cmd == "identify" and len(parts) >= 2:
-                print(cmd_identify(parts[1]), flush=True)
+                print(cmd_identify(parts[1], min_samples=DEFAULT_MIN_SAMPLES), flush=True)
             elif cmd == "enroll" and len(parts) >= 3:
-                print(cmd_enroll(parts[1], parts[2]), flush=True)
+                print(cmd_enroll(parts[1], parts[2], max_samples=DEFAULT_MAX_SAMPLES), flush=True)
             else:
                 print(f"ERROR:unknown command: {cmd}", flush=True)
         except Exception as e:

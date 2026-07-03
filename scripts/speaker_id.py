@@ -149,10 +149,14 @@ def cmd_enroll(speaker_id, audio_path, max_samples=DEFAULT_MAX_SAMPLES):
     # Reload all embeddings (including the new one) for threshold computation
     all_files = sorted(f for f in os.listdir(emb_dir) if f.endswith(".npy"))
     all_embeddings = [np.load(os.path.join(emb_dir, f)) for f in all_files]
+    all_embeddings = [
+        e / np.linalg.norm(e) if np.linalg.norm(e) > 0 else e
+        for e in all_embeddings
+    ]
     n = len(all_embeddings)
 
-    if n == 1:
-        threshold = 0.60
+    if n < 3:
+        threshold = 0.60  # too few samples for meaningful LOO margin
     else:
         loo_scores = []
         for i in range(n):
@@ -269,6 +273,9 @@ if __name__ == "__main__":
             print(f"ERROR:{e}")
             sys.exit(1)
     elif cmd == "identify":
+        if len(sys.argv) < 3:
+            print("Error: identify requires <audio_path>")
+            sys.exit(1)
         try:
             get_classifier()
             print(cmd_identify(sys.argv[2]))

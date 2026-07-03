@@ -769,32 +769,8 @@
     </div>
 
     <div class="container-full">
-        <!-- Settings Card -->
-        <div class="card" style="margin-bottom: 2rem;">
-            <h2>
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
-                Settings
-            </h2>
-            <div class="settings-grid">
-                <div class="form-group" style="margin-bottom:0;">
-                    <label for="setting-curated-folder">Curated Audio Folder</label>
-                    <input type="text" id="setting-curated-folder" class="form-control" placeholder="data/curated">
-                </div>
-                <div class="form-group" style="margin-bottom:0;">
-                    <label for="setting-min-samples">Min Enrollment Samples</label>
-                    <input type="number" id="setting-min-samples" class="form-control" min="1" max="20" placeholder="3">
-                </div>
-                <div class="form-group" style="margin-bottom:0;">
-                    <label for="setting-max-samples">Max Enrollment Samples</label>
-                    <input type="number" id="setting-max-samples" class="form-control" min="1" max="50" placeholder="10">
-                </div>
-                <button class="btn btn-primary" id="save-settings-btn" style="white-space:nowrap;">Save Settings</button>
-            </div>
-            <div id="settings-status" style="margin-top:0.75rem; font-size:0.82rem; color:var(--text-muted); font-family:var(--font-mono); min-height:1.2em;"></div>
-        </div>
-
         <!-- Recordings Card -->
-        <div class="card">
+        <div class="card" style="margin-bottom: 2rem;">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
                 <h2 style="margin-bottom:0; border-left-color: var(--secondary-color);">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>
@@ -822,6 +798,30 @@
                     </tbody>
                 </table>
             </div>
+        </div>
+
+        <!-- Settings Card -->
+        <div class="card">
+            <h2>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                Settings
+            </h2>
+            <div class="settings-grid">
+                <div class="form-group" style="margin-bottom:0;">
+                    <label for="setting-curated-folder">Curated Audio Folder</label>
+                    <input type="text" id="setting-curated-folder" class="form-control" placeholder="data/curated">
+                </div>
+                <div class="form-group" style="margin-bottom:0;">
+                    <label for="setting-min-samples">Min Enrollment Samples</label>
+                    <input type="number" id="setting-min-samples" class="form-control" min="1" max="20" placeholder="3">
+                </div>
+                <div class="form-group" style="margin-bottom:0;">
+                    <label for="setting-max-samples">Max Enrollment Samples</label>
+                    <input type="number" id="setting-max-samples" class="form-control" min="1" max="50" placeholder="10">
+                </div>
+                <button class="btn btn-primary" id="save-settings-btn" style="white-space:nowrap;">Save Settings</button>
+            </div>
+            <div id="settings-status" style="margin-top:0.75rem; font-size:0.82rem; color:var(--text-muted); font-family:var(--font-mono); min-height:1.2em;"></div>
         </div>
     </div>
 

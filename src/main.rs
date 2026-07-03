@@ -1,12 +1,14 @@
 use chrono::Local;
 use axum::{
-    extract::{DefaultBodyLimit, Multipart, State},
+    extract::{DefaultBodyLimit, Multipart, Path, State},
     http::{header, Method, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::io::Write;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
@@ -30,9 +32,27 @@ impl SpeakerIdWorker {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+struct AppSettings {
+    curated_audio_folder: String,
+    min_enrollment_samples: usize,
+    max_enrollment_samples: usize,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            curated_audio_folder: "data/curated".to_string(),
+            min_enrollment_samples: 3,
+            max_enrollment_samples: 10,
+        }
+    }
+}
+
 struct AppState {
     model: Mutex<Nemotron>,
     speaker_id: Mutex<SpeakerIdWorker>,
+    settings: Mutex<AppSettings>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -58,6 +78,12 @@ struct SessionInfo {
     speaker_id: String,
     confidence: f64,
     audio_url: String,
+    confirmed: bool,
+}
+
+#[derive(Serialize)]
+struct EnrollResponse {
+    sample_count: usize,
 }
 
 fn get_python_path() -> &'static str {
@@ -96,6 +122,63 @@ async fn spawn_speaker_id_worker(
     Ok(SpeakerIdWorker { _child: child, stdin, stdout })
 }
 
+fn load_or_create_settings() -> AppSettings {
+    let path = "settings.json";
+    if let Ok(content) = std::fs::read_to_string(path) {
+        if let Ok(s) = serde_json::from_str::<AppSettings>(&content) {
+            return s;
+        }
+    }
+    let defaults = AppSettings::default();
+    if let Ok(json) = serde_json::to_string_pretty(&defaults) {
+        let _ = std::fs::write(path, json);
+    }
+    defaults
+}
+
+async fn scan_and_enroll_curated(worker: &mut SpeakerIdWorker, curated_folder: &str) {
+    let manifest_path = "data/curated/.enrolled";
+    let enrolled: std::collections::HashSet<String> = std::fs::read_to_string(manifest_path)
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.to_string())
+        .collect();
+
+    let mut manifest_file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(manifest_path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Failed to open curated manifest: {}", e);
+            return;
+        }
+    };
+
+    if let Ok(speaker_dirs) = std::fs::read_dir(curated_folder) {
+        for speaker_entry in speaker_dirs.flatten() {
+            if !speaker_entry.path().is_dir() { continue; }
+            let speaker_id = speaker_entry.file_name().to_string_lossy().to_string();
+            if let Ok(wav_files) = std::fs::read_dir(speaker_entry.path()) {
+                for wav_entry in wav_files.flatten() {
+                    let wav_path = wav_entry.path().to_string_lossy().to_string();
+                    if !wav_path.ends_with(".wav") { continue; }
+                    if enrolled.contains(&wav_path) { continue; }
+                    let cmd = format!("enroll {} {}\n", speaker_id, wav_path);
+                    match worker.send(&cmd).await {
+                        Ok(resp) => {
+                            println!("Curated enroll {}: {}", wav_path, resp);
+                            let _ = writeln!(manifest_file, "{}", wav_path);
+                        }
+                        Err(e) => eprintln!("Curated enroll error for {}: {}", wav_path, e),
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     println!("Loading Nemotron ASR model from ./models...");
@@ -112,8 +195,11 @@ async fn main() {
     std::fs::create_dir_all("data/sessions").unwrap();
     std::fs::create_dir_all("data/speakers").unwrap();
 
+    let settings_val = load_or_create_settings();
+    std::fs::create_dir_all(&settings_val.curated_audio_folder).unwrap();
+
     let python_path = get_python_path();
-    let worker = match spawn_speaker_id_worker(python_path).await {
+    let mut worker = match spawn_speaker_id_worker(python_path).await {
         Ok(w) => w,
         Err(e) => {
             eprintln!("Failed to start speaker ID worker: {:?}", e);
@@ -121,9 +207,14 @@ async fn main() {
         }
     };
 
+    // Auto-enroll any unprocessed curated WAVs before wrapping worker in Arc
+    let settings_for_scan = settings_val.curated_audio_folder.clone();
+    scan_and_enroll_curated(&mut worker, &settings_for_scan).await;
+
     let shared_state = Arc::new(AppState {
         model: Mutex::new(model),
         speaker_id: Mutex::new(worker),
+        settings: Mutex::new(settings_val),
     });
 
     let cors = tower_http::cors::CorsLayer::new()
@@ -135,7 +226,10 @@ async fn main() {
         .route("/api/transcribe", post(transcribe_handler))
         .route("/api/speakers/enroll", post(enroll_handler))
         .route("/api/speakers/aliases", get(get_aliases_handler).post(update_aliases_handler))
+        .route("/api/speakers/learn", post(learn_from_curated_handler))
         .route("/api/sessions", get(get_sessions_handler))
+        .route("/api/sessions/:session_id/confirm", post(confirm_session_handler))
+        .route("/api/settings", get(get_settings_handler).post(update_settings_handler))
         .layer(DefaultBodyLimit::max(20 * 1024 * 1024))
         .layer(cors)
         .nest_service("/data", tower_http::services::ServeDir::new("data"))
@@ -147,8 +241,14 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
-async fn get_sessions_handler() -> impl IntoResponse {
+async fn get_sessions_handler(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     let mut sessions: Vec<SessionInfo> = Vec::new();
+
+    let settings = state.settings.lock().await;
+    let curated_folder = settings.curated_audio_folder.clone();
+    drop(settings);
 
     if let Ok(entries) = std::fs::read_dir("data/sessions") {
         for entry in entries.flatten() {
@@ -185,6 +285,9 @@ async fn get_sessions_handler() -> impl IntoResponse {
                 .parse::<f64>()
                 .unwrap_or(0.0);
 
+            let confirmed_path = format!("{}/{}/{}.wav", curated_folder, speaker_id, name);
+            let confirmed = std::path::Path::new(&confirmed_path).exists();
+
             sessions.push(SessionInfo {
                 audio_url: format!("/data/sessions/{}/audio.wav", name),
                 session_id: name,
@@ -192,6 +295,7 @@ async fn get_sessions_handler() -> impl IntoResponse {
                 transcript,
                 speaker_id,
                 confidence,
+                confirmed,
             });
         }
     }
@@ -271,7 +375,7 @@ async fn transcribe_handler(
 async fn enroll_handler(
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<Json<EnrollResponse>, (StatusCode, String)> {
     println!("POST /api/speakers/enroll");
     let mut audio_bytes = Vec::new();
     let mut speaker_id = String::new();
@@ -310,6 +414,12 @@ async fn enroll_handler(
         return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Enrollment failed: {}", result)));
     }
 
+    let sample_count = result
+        .split(":count=")
+        .nth(1)
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+
     let aliases: Vec<String> = aliases_str
         .split(',')
         .map(|s| s.trim().to_string())
@@ -331,7 +441,7 @@ async fn enroll_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     println!("POST /api/speakers/enroll -> enrolled '{}' as '{}'", speaker_id, display_name);
-    Ok(StatusCode::OK)
+    Ok(Json(EnrollResponse { sample_count }))
 }
 
 async fn get_aliases_handler() -> impl IntoResponse {
@@ -364,4 +474,94 @@ async fn update_aliases_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(StatusCode::OK)
+}
+
+async fn get_settings_handler(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let settings = state.settings.lock().await.clone();
+    Json(settings)
+}
+
+async fn update_settings_handler(
+    State(state): State<Arc<AppState>>,
+    Json(patch): Json<Value>,
+) -> Result<Json<AppSettings>, (StatusCode, String)> {
+    let mut settings = state.settings.lock().await;
+    // Merge patch fields
+    if let Some(v) = patch.get("curated_audio_folder").and_then(|v| v.as_str()) {
+        settings.curated_audio_folder = v.to_string();
+    }
+    if let Some(v) = patch.get("min_enrollment_samples").and_then(|v| v.as_u64()) {
+        settings.min_enrollment_samples = v as usize;
+    }
+    if let Some(v) = patch.get("max_enrollment_samples").and_then(|v| v.as_u64()) {
+        settings.max_enrollment_samples = v as usize;
+    }
+    let updated = settings.clone();
+    drop(settings);
+    // Persist
+    let json = serde_json::to_string_pretty(&updated)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    std::fs::write("settings.json", json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(updated))
+}
+
+async fn confirm_session_handler(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<EnrollResponse>, (StatusCode, String)> {
+    let session_dir = format!("data/sessions/{}", session_id);
+    let speaker_id = std::fs::read_to_string(format!("{}/speaker.txt", session_dir))
+        .map_err(|_| (StatusCode::NOT_FOUND, "Session not found".to_string()))?
+        .trim()
+        .to_string();
+    if speaker_id == "Unknown" || speaker_id.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Cannot confirm session with unknown speaker".to_string()));
+    }
+
+    let curated_folder = state.settings.lock().await.curated_audio_folder.clone();
+    let dest_dir = format!("{}/{}", curated_folder, speaker_id);
+    std::fs::create_dir_all(&dest_dir)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let src = format!("{}/audio.wav", session_dir);
+    let dest = format!("{}/{}.wav", dest_dir, session_id);
+    std::fs::copy(&src, &dest)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Append to manifest
+    let manifest_path = "data/curated/.enrolled";
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(manifest_path) {
+        let _ = writeln!(f, "{}", dest);
+    }
+
+    let result = {
+        let mut worker = state.speaker_id.lock().await;
+        worker.send(&format!("enroll {} {}\n", speaker_id, dest)).await
+            .unwrap_or_else(|e| format!("ERROR:{}", e))
+    };
+
+    if result.starts_with("ERROR") {
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Enrollment failed: {}", result)));
+    }
+
+    let sample_count = result
+        .split(":count=")
+        .nth(1)
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+
+    println!("Confirmed session {} → enrolled into speaker '{}'", session_id, speaker_id);
+    Ok(Json(EnrollResponse { sample_count }))
+}
+
+async fn learn_from_curated_handler(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let curated_folder = state.settings.lock().await.curated_audio_folder.clone();
+    let mut worker = state.speaker_id.lock().await;
+    scan_and_enroll_curated(&mut worker, &curated_folder).await;
+    StatusCode::OK
 }

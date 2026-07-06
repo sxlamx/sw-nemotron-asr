@@ -1,0 +1,5 @@
+{
+  "curated_audio_folder": "data/curated",
+  "min_enrollment_samples": 3,
+  "max_enrollment_samples": 10
+}

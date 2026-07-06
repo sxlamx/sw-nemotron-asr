@@ -5,6 +5,23 @@ import shutil
 import numpy as np
 import torch
 import soundfile as sf
+
+# Windows: symlink creation requires elevated privileges; fall back to copy
+_orig_symlink = os.symlink
+def _symlink_or_copy(src, dst, target_is_directory=False):
+    try:
+        _orig_symlink(src, dst, target_is_directory)
+    except OSError:
+        if os.path.isdir(src):
+            shutil.copytree(src, dst)
+        else:
+            shutil.copy2(src, dst)
+os.symlink = _symlink_or_copy
+
+# Windows: corporate proxy intercepts HTTPS; disable SSL verification for model downloads
+import ssl as _ssl
+_ssl._create_default_https_context = _ssl._create_unverified_context
+
 from speechbrain.inference.speaker import EncoderClassifier
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -33,14 +50,19 @@ def get_classifier():
 def get_vad_model():
     global _vad_model, _vad_utils
     if _vad_model is None:
-        # Silero VAD is loaded via torch.hub and cached locally
-        _vad_model, utils = torch.hub.load(
-            repo_or_dir='snakers4/silero-vad',
-            model='silero_vad',
-            force_reload=False,
-            onnx=False
-        )
-        _vad_utils = utils
+        try:
+            # Use pip-installed silero_vad package (avoids torch.hub GitHub download)
+            from silero_vad import load_silero_vad, get_speech_timestamps, collect_chunks
+            _vad_model = load_silero_vad()
+            _vad_utils = (get_speech_timestamps, None, None, None, collect_chunks)
+        except Exception:
+            # Fallback to torch.hub (requires network)
+            _vad_model, _vad_utils = torch.hub.load(
+                repo_or_dir='snakers4/silero-vad',
+                model='silero_vad',
+                force_reload=False,
+                onnx=False
+            )
     return _vad_model, _vad_utils
 
 def get_embedding(audio_path):
@@ -78,8 +100,8 @@ def get_embedding(audio_path):
         vad_model, utils = get_vad_model()
         get_speech_timestamps, _, _, _, collect_chunks = utils
 
-        # Get speech intervals
-        speech_timestamps = get_speech_timestamps(signal_mono, vad_model, sampling_rate=16000)
+        # Get speech intervals (lower threshold for short clips to reduce false negatives)
+        speech_timestamps = get_speech_timestamps(signal_mono, vad_model, sampling_rate=16000, threshold=0.3)
 
         if len(speech_timestamps) > 0:
             signal_mono = collect_chunks(speech_timestamps, signal_mono)

@@ -1,4 +1,6 @@
 use chrono::Local;
+use tracing::{error, info, warn};
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 use axum::{
     extract::{DefaultBodyLimit, Multipart, Path, State},
     http::{header, Method, StatusCode},
@@ -97,7 +99,7 @@ fn get_python_path() -> &'static str {
 async fn spawn_speaker_id_worker(
     python_path: &str,
 ) -> Result<SpeakerIdWorker, Box<dyn std::error::Error + Send + Sync>> {
-    println!("Starting speaker ID worker (loading model)...");
+    info!("Starting speaker ID worker (loading model)...");
     let mut child = tokio::process::Command::new(python_path)
         .args(["scripts/speaker_id.py", "persist"])
         .stdin(std::process::Stdio::piped())
@@ -118,7 +120,7 @@ async fn spawn_speaker_id_worker(
         return Err(format!("worker did not send READY (got: {:?})", ready.trim()).into());
     }
 
-    println!("Speaker ID worker ready.");
+    info!("Speaker ID worker ready.");
     Ok(SpeakerIdWorker { _child: child, stdin, stdout })
 }
 
@@ -151,7 +153,7 @@ async fn scan_and_enroll_curated(worker: &mut SpeakerIdWorker, curated_folder: &
     {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("Failed to open curated manifest: {}", e);
+            error!("Failed to open curated manifest: {}", e);
             return;
         }
     };
@@ -168,10 +170,10 @@ async fn scan_and_enroll_curated(worker: &mut SpeakerIdWorker, curated_folder: &
                     let cmd = format!("enroll {} {}\n", speaker_id, wav_path);
                     match worker.send(&cmd).await {
                         Ok(resp) => {
-                            println!("Curated enroll {}: {}", wav_path, resp);
+                            info!("Curated enroll {}: {}", wav_path, resp);
                             let _ = writeln!(manifest_file, "{}", wav_path);
                         }
-                        Err(e) => eprintln!("Curated enroll error for {}: {}", wav_path, e),
+                        Err(e) => error!("Curated enroll error for {}: {}", wav_path, e),
                     }
                 }
             }
@@ -181,16 +183,25 @@ async fn scan_and_enroll_curated(worker: &mut SpeakerIdWorker, curated_folder: &
 
 #[tokio::main]
 async fn main() {
-    println!("Loading Nemotron ASR model from ./models...");
+    // Logs to terminal (with colour) AND logs/server.log.YYYY-MM-DD (plain text, date-rolled)
+    std::fs::create_dir_all("logs").ok();
+    let file_appender = tracing_appender::rolling::daily("logs", "server.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    tracing_subscriber::registry()
+        .with(fmt::layer().with_writer(std::io::stdout))
+        .with(fmt::layer().with_writer(non_blocking).with_ansi(false))
+        .init();
+
+    info!("Loading Nemotron ASR model from ./models...");
     let model = match Nemotron::from_pretrained("models", None) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("Failed to load Nemotron model: {:?}", e);
-            eprintln!("Ensure encoder.onnx, decoder_joint.onnx, and tokenizer.model are present in ./models");
+            error!("Failed to load Nemotron model: {:?}", e);
+            error!("Ensure encoder.onnx, decoder_joint.onnx, and tokenizer.model are present in ./models");
             return;
         }
     };
-    println!("Nemotron ASR model loaded successfully!");
+    info!("Nemotron ASR model loaded successfully!");
 
     std::fs::create_dir_all("data/sessions").unwrap();
     std::fs::create_dir_all("data/speakers").unwrap();
@@ -202,7 +213,7 @@ async fn main() {
     let mut worker = match spawn_speaker_id_worker(python_path).await {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("Failed to start speaker ID worker: {:?}", e);
+            error!("Failed to start speaker ID worker: {:?}", e);
             return;
         }
     };
@@ -237,7 +248,7 @@ async fn main() {
         .with_state(shared_state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3007").await.unwrap();
-    println!("AuraNemotron ASR backend is running on http://127.0.0.1:3007");
+    info!("AuraNemotron ASR backend is running on http://127.0.0.1:3007");
     axum::serve(listener, app).await.unwrap();
 }
 
@@ -309,7 +320,7 @@ async fn transcribe_handler(
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> Result<Json<TranscribeResponse>, (StatusCode, String)> {
-    println!("POST /api/transcribe");
+    info!("POST /api/transcribe");
     let mut audio_bytes = Vec::new();
 
     while let Ok(Some(field)) = multipart.next_field().await {
@@ -346,19 +357,19 @@ async fn transcribe_handler(
         let mut worker = state.speaker_id.lock().await;
         match worker.send(&format!("identify {}\n", audio_path)).await {
             Ok(resp) => {
-                println!("Speaker ID response: {}", resp);
+                info!("Speaker ID response: {}", resp);
                 if resp.starts_with("IDENTIFIED:") {
                     let parts: Vec<&str> = resp.split(':').collect();
                     let speaker = parts.get(1).unwrap_or(&"Unknown").to_string();
                     let conf = parts.get(2).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
                     (speaker, conf)
                 } else {
-                    eprintln!("Speaker ID error: {}", resp);
+                    warn!("Speaker ID error: {}", resp);
                     ("Unknown".to_string(), 0.0)
                 }
             }
             Err(e) => {
-                eprintln!("Speaker ID worker error: {}", e);
+                error!("Speaker ID worker error: {}", e);
                 ("Unknown".to_string(), 0.0)
             }
         }
@@ -367,7 +378,7 @@ async fn transcribe_handler(
     let _ = std::fs::write(format!("{}/speaker.txt", session_dir), &speaker_id);
     let _ = std::fs::write(format!("{}/confidence.txt", session_dir), confidence.to_string());
 
-    println!("POST /api/transcribe -> session={} speaker={} confidence={} transcript={:?}",
+    info!("POST /api/transcribe -> session={} speaker={} confidence={:.4} transcript={:?}",
         session_id, speaker_id, confidence, transcript_trimmed);
     Ok(Json(TranscribeResponse { session_id, transcript: transcript_trimmed, speaker_id, confidence }))
 }
@@ -376,7 +387,7 @@ async fn enroll_handler(
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> Result<Json<EnrollResponse>, (StatusCode, String)> {
-    println!("POST /api/speakers/enroll");
+    info!("POST /api/speakers/enroll");
     let mut audio_bytes = Vec::new();
     let mut speaker_id = String::new();
     let mut display_name = String::new();
@@ -444,7 +455,7 @@ async fn enroll_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    println!("POST /api/speakers/enroll -> enrolled '{}' as '{}'", speaker_id, display_name);
+    info!("POST /api/speakers/enroll -> enrolled '{}' as '{}'", speaker_id, display_name);
     Ok(Json(EnrollResponse { sample_count }))
 }
 
@@ -561,7 +572,7 @@ async fn confirm_session_handler(
         .and_then(|s| s.split(':').next()?.parse::<usize>().ok())
         .unwrap_or(0);
 
-    println!("Confirmed session {} → enrolled into speaker '{}'", session_id, speaker_id);
+    info!("Confirmed session {} -> enrolled into speaker '{}'", session_id, speaker_id);
     Ok(Json(EnrollResponse { sample_count }))
 }
 

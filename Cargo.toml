@@ -14,3 +14,6 @@ uuid = { version = "1.10.0", features = ["v4", "serde"] }
 hound = "3.5.1"
 anyhow = "1.0.86"
 chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2"

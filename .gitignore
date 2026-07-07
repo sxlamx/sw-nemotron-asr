@@ -223,3 +223,9 @@ data/
 
 # Git worktrees
 .worktrees/
+
+# Server logs
+logs/
+server_out.log
+server_err.log
+server.log

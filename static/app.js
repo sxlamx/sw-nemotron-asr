@@ -83,22 +83,34 @@ document.addEventListener('DOMContentLoaded', () => {
     initLangSelectors();
 });
 
+window.addEventListener('beforeunload', () => {
+    if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
+    if (ws) ws.close();
+});
+
 // ─── WebSocket Management ────────────────────────────────────────────────────
+
+let wsPendingResponse = false;
 
 function connectWebSocket() {
     if (wsReconnectTimer) {
         clearTimeout(wsReconnectTimer);
         wsReconnectTimer = null;
     }
+    // Don't open a second connection if one is already live
+    if (ws && ws.readyState !== WebSocket.CLOSED) return;
     try {
-        ws = new WebSocket('ws://localhost:3007/ws/transcribe');
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${proto}//${location.host}/ws/transcribe`;
+        ws = new WebSocket(wsUrl);
         ws.binaryType = 'arraybuffer';
 
         ws.onopen = () => {
-            console.log('[WS] Connected to ws://localhost:3007/ws/transcribe');
+            console.log('[WS] Connected to', wsUrl);
         };
 
         ws.onmessage = (event) => {
+            wsPendingResponse = false;
             try {
                 const data = JSON.parse(event.data);
                 displayLiveResult(data);
@@ -113,6 +125,10 @@ function connectWebSocket() {
 
         ws.onclose = (event) => {
             console.log('[WS] Connection closed (code:', event.code, '). Reconnecting in 3s...');
+            if (wsPendingResponse) {
+                wsPendingResponse = false;
+                resetRecordUI();
+            }
             ws = null;
             wsReconnectTimer = setTimeout(connectWebSocket, 3000);
         };
@@ -134,9 +150,11 @@ async function sendAudioViaWS(blob) {
     showLiveProcessing();
     try {
         const arrayBuffer = await blob.arrayBuffer();
+        wsPendingResponse = true;
         ws.send(arrayBuffer);
         // Response arrives asynchronously via ws.onmessage → displayLiveResult
     } catch (err) {
+        wsPendingResponse = false;
         console.error('[WS] Error sending audio:', err);
         resetRecordUI();
     }

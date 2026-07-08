@@ -761,7 +761,14 @@ async function fetchSettings() {
             settingCuratedFolder.value = s.curated_audio_folder;
             settingMinSamples.value = s.min_enrollment_samples;
             settingMaxSamples.value = s.max_enrollment_samples;
-            // Populate language dropdowns from server settings
+            // Populate settings panel fields for API key and language defaults
+            const settingsApiKey = document.getElementById('settings-nemotron-api-key');
+            if (settingsApiKey && s.nemotron_api_key) settingsApiKey.value = s.nemotron_api_key;
+            const settingsSourceLang = document.getElementById('settings-source-lang');
+            if (settingsSourceLang && s.source_language) settingsSourceLang.value = s.source_language;
+            const settingsTargetLang = document.getElementById('settings-target-lang');
+            if (settingsTargetLang && s.target_language) settingsTargetLang.value = s.target_language;
+            // Populate recording-area language dropdowns from server settings
             if (s.source_language) {
                 const sourceLang = document.getElementById('source-lang');
                 if (sourceLang) sourceLang.value = s.source_language;
@@ -781,6 +788,9 @@ saveSettingsBtn.addEventListener('click', async () => {
         curated_audio_folder: settingCuratedFolder.value.trim(),
         min_enrollment_samples: parseInt(settingMinSamples.value, 10),
         max_enrollment_samples: parseInt(settingMaxSamples.value, 10),
+        nemotron_api_key: document.getElementById('settings-nemotron-api-key').value.trim(),
+        source_language: document.getElementById('settings-source-lang').value,
+        target_language: document.getElementById('settings-target-lang').value,
     };
     if (isNaN(patch.min_enrollment_samples) || isNaN(patch.max_enrollment_samples)
         || patch.min_enrollment_samples < 1 || patch.max_enrollment_samples < 1
@@ -799,6 +809,11 @@ saveSettingsBtn.addEventListener('click', async () => {
         if (res.ok) {
             settingsStatus.innerText = 'Settings saved.';
             settingsStatus.style.color = 'var(--success-color)';
+            // Sync recording-area language dropdowns to match saved settings values
+            const srcLangEl = document.getElementById('source-lang');
+            const tgtLangEl = document.getElementById('target-lang');
+            if (srcLangEl) srcLangEl.value = patch.source_language;
+            if (tgtLangEl) tgtLangEl.value = patch.target_language;
         } else {
             settingsStatus.innerText = 'Failed to save settings.';
             settingsStatus.style.color = 'var(--accent-color)';

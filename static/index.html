@@ -990,6 +990,32 @@
                     <label for="setting-max-samples">Max Enrollment Samples</label>
                     <input type="number" id="setting-max-samples" class="form-control" min="1" max="50" placeholder="10">
                 </div>
+                <div></div>
+                <div class="form-group" style="margin-bottom:0;">
+                    <label for="settings-nemotron-api-key">NVIDIA Nemotron API Key</label>
+                    <input type="password" id="settings-nemotron-api-key" class="form-control" placeholder="nvapi-...">
+                </div>
+                <div class="form-group" style="margin-bottom:0;">
+                    <label for="settings-source-lang">Default Source Language</label>
+                    <select id="settings-source-lang" class="form-control">
+                        <option value="auto">Auto-detect</option>
+                        <option value="en">English</option>
+                        <option value="zh">Chinese</option>
+                        <option value="ms">Malay</option>
+                        <option value="ta">Tamil</option>
+                        <option value="ko">Korean</option>
+                    </select>
+                </div>
+                <div class="form-group" style="margin-bottom:0;">
+                    <label for="settings-target-lang">Default Target Language</label>
+                    <select id="settings-target-lang" class="form-control">
+                        <option value="en">English</option>
+                        <option value="zh">Chinese</option>
+                        <option value="ms">Malay</option>
+                        <option value="ta">Tamil</option>
+                        <option value="ko">Korean</option>
+                    </select>
+                </div>
                 <button class="btn btn-primary" id="save-settings-btn" style="white-space:nowrap;">Save Settings</button>
             </div>
             <div id="settings-status" style="margin-top:0.75rem; font-size:0.82rem; color:var(--text-muted); font-family:var(--font-mono); min-height:1.2em;"></div>

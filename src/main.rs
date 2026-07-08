@@ -15,7 +15,6 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::Mutex;
-use parakeet_rs::Nemotron;
 use uuid::Uuid;
 
 struct SpeakerIdWorker {
@@ -34,11 +33,17 @@ impl SpeakerIdWorker {
     }
 }
 
+// Re-use same stdin/stdout subprocess protocol for the ASR+translate worker
+type AstrWorker = SpeakerIdWorker;
+
 #[derive(Serialize, Deserialize, Clone)]
 struct AppSettings {
     curated_audio_folder: String,
     min_enrollment_samples: usize,
     max_enrollment_samples: usize,
+    nemotron_api_key: String,
+    source_language: String,   // "auto", "en", "zh", "ms", "ta", "ko"
+    target_language: String,   // "en", "zh", "ms", "ta", "ko"
 }
 
 impl Default for AppSettings {
@@ -47,13 +52,16 @@ impl Default for AppSettings {
             curated_audio_folder: "data/curated".to_string(),
             min_enrollment_samples: 3,
             max_enrollment_samples: 10,
+            nemotron_api_key: String::new(),
+            source_language: "auto".to_string(),
+            target_language: "en".to_string(),
         }
     }
 }
 
 struct AppState {
-    model: Mutex<Nemotron>,
     speaker_id: Mutex<SpeakerIdWorker>,
+    astr: Mutex<AstrWorker>,
     settings: Mutex<AppSettings>,
 }
 
@@ -121,6 +129,34 @@ async fn spawn_speaker_id_worker(
     }
 
     info!("Speaker ID worker ready.");
+    Ok(SpeakerIdWorker { _child: child, stdin, stdout })
+}
+
+async fn spawn_astr_worker(
+    python_path: &str,
+) -> Result<AstrWorker, Box<dyn std::error::Error + Send + Sync>> {
+    info!("Starting ASR+translate worker (loading Whisper model)...");
+    let mut child = tokio::process::Command::new(python_path)
+        .args(["scripts/asr_translate_worker.py"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()?;
+
+    let stdin = tokio::io::BufWriter::new(
+        child.stdin.take().ok_or("failed to open astr stdin")?,
+    );
+    let mut stdout = BufReader::new(
+        child.stdout.take().ok_or("failed to open astr stdout")?,
+    );
+
+    let mut ready = String::new();
+    stdout.read_line(&mut ready).await?;
+    if ready.trim() != "READY" {
+        return Err(format!("astr worker did not send READY (got: {:?})", ready.trim()).into());
+    }
+
+    info!("ASR+translate worker ready.");
     Ok(SpeakerIdWorker { _child: child, stdin, stdout })
 }
 
@@ -192,17 +228,6 @@ async fn main() {
         .with(fmt::layer().with_writer(non_blocking).with_ansi(false))
         .init();
 
-    info!("Loading Nemotron ASR model from ./models...");
-    let model = match Nemotron::from_pretrained("models", None) {
-        Ok(m) => m,
-        Err(e) => {
-            error!("Failed to load Nemotron model: {:?}", e);
-            error!("Ensure encoder.onnx, decoder_joint.onnx, and tokenizer.model are present in ./models");
-            return;
-        }
-    };
-    info!("Nemotron ASR model loaded successfully!");
-
     std::fs::create_dir_all("data/sessions").unwrap();
     std::fs::create_dir_all("data/speakers").unwrap();
 
@@ -218,13 +243,21 @@ async fn main() {
         }
     };
 
+    let mut astr_worker = match spawn_astr_worker(python_path).await {
+        Ok(w) => w,
+        Err(e) => {
+            error!("Failed to start ASR+translate worker: {:?}", e);
+            return;
+        }
+    };
+
     // Auto-enroll any unprocessed curated WAVs before wrapping worker in Arc
     let settings_for_scan = settings_val.curated_audio_folder.clone();
     scan_and_enroll_curated(&mut worker, &settings_for_scan).await;
 
     let shared_state = Arc::new(AppState {
-        model: Mutex::new(model),
         speaker_id: Mutex::new(worker),
+        astr: Mutex::new(astr_worker),
         settings: Mutex::new(settings_val),
     });
 

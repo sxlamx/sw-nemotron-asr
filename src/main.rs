@@ -2,7 +2,7 @@ use chrono::Local;
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 use axum::{
-    extract::{DefaultBodyLimit, Multipart, Path, State},
+    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, DefaultBodyLimit, Multipart, Path, State},
     http::{header, Method, StatusCode},
     response::IntoResponse,
     routing::{get, post},
@@ -270,6 +270,7 @@ async fn main() {
         .allow_origin(tower_http::cors::Any);
 
     let app = Router::new()
+        .route("/ws/transcribe", get(ws_transcribe_handler))
         .route("/api/transcribe", post(transcribe_handler))
         .route("/api/speakers/enroll", post(enroll_handler))
         .route("/api/speakers/aliases", get(get_aliases_handler).post(update_aliases_handler))
@@ -708,4 +709,157 @@ async fn learn_from_curated_handler(
     let mut worker = state.speaker_id.lock().await;
     scan_and_enroll_curated(&mut worker, &curated_folder).await;
     StatusCode::OK
+}
+
+async fn ws_transcribe_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| async move {
+        tokio::spawn(ws_transcribe_loop(socket, state));
+    })
+}
+
+async fn ws_transcribe_loop(mut socket: WebSocket, state: Arc<AppState>) {
+    loop {
+        let msg = match socket.recv().await {
+            Some(Ok(m)) => m,
+            Some(Err(e)) => { error!("WS recv error: {}", e); break; }
+            None => break,
+        };
+
+        let audio_bytes = match msg {
+            Message::Binary(bytes) => bytes,
+            Message::Close(_) => break,
+            _ => continue, // ignore text, ping, pong
+        };
+
+        // Write audio to a flat temp file (no session directory)
+        let audio_path = format!("data/sessions/ws_{}.wav", Uuid::new_v4());
+        if let Err(e) = std::fs::write(&audio_path, &audio_bytes) {
+            let errmsg = format!("Failed to write audio: {}", e);
+            error!("WS: {}", errmsg);
+            let _ = socket.send(Message::Text(
+                serde_json::json!({"status":"error","message":errmsg}).to_string()
+            )).await;
+            continue;
+        }
+
+        // Read settings once; drop lock immediately
+        let (source_lang, target_lang, api_key) = {
+            let s = state.settings.lock().await;
+            (s.source_language.clone(), s.target_language.clone(), s.nemotron_api_key.clone())
+        };
+
+        // Transcribe — acquire and release the astr lock before any further awaits
+        let astr_req = serde_json::json!({
+            "cmd": "transcribe",
+            "audio_path": audio_path,
+            "source_lang": source_lang,
+        }).to_string();
+        let astr_resp = {
+            let mut astr = state.astr.lock().await;
+            astr.send(&format!("{}\n", astr_req)).await
+        };
+
+        let (transcript_trimmed, detected_lang) = match astr_resp {
+            Ok(resp) => match serde_json::from_str::<Value>(&resp) {
+                Ok(v) if v["status"] == "ok" => (
+                    v["text"].as_str().unwrap_or("").trim().to_string(),
+                    v["detected_lang"].as_str().unwrap_or("en").to_string(),
+                ),
+                Ok(v) => {
+                    let errmsg = v["message"].as_str().unwrap_or("ASR error").to_string();
+                    warn!("WS ASR error: {}", errmsg);
+                    let _ = socket.send(Message::Text(
+                        serde_json::json!({"status":"error","message":errmsg}).to_string()
+                    )).await;
+                    let _ = std::fs::remove_file(&audio_path);
+                    continue;
+                }
+                Err(e) => {
+                    let errmsg = format!("ASR parse error: {}", e);
+                    error!("WS {}", errmsg);
+                    let _ = socket.send(Message::Text(
+                        serde_json::json!({"status":"error","message":errmsg}).to_string()
+                    )).await;
+                    let _ = std::fs::remove_file(&audio_path);
+                    continue;
+                }
+            },
+            Err(e) => {
+                let errmsg = format!("ASR error: {}", e);
+                error!("WS {}", errmsg);
+                let _ = socket.send(Message::Text(
+                    serde_json::json!({"status":"error","message":errmsg}).to_string()
+                )).await;
+                let _ = std::fs::remove_file(&audio_path);
+                continue;
+            }
+        };
+
+        // Translate via Nemotron (skip if no key, same lang, or empty transcript)
+        let translation = if !api_key.is_empty()
+            && detected_lang != target_lang
+            && !transcript_trimmed.is_empty()
+        {
+            let trans_req = serde_json::json!({
+                "cmd": "translate",
+                "text": transcript_trimmed,
+                "source_lang": detected_lang,
+                "target_lang": target_lang,
+                "api_key": api_key,
+            }).to_string();
+            let trans_resp = {
+                let mut astr = state.astr.lock().await;
+                astr.send(&format!("{}\n", trans_req)).await
+            };
+            match trans_resp {
+                Ok(resp) => match serde_json::from_str::<Value>(&resp) {
+                    Ok(v) if v["status"] == "ok" => {
+                        v["translation"].as_str().unwrap_or("").to_string()
+                    }
+                    Ok(v) => { warn!("WS translate error: {}", v["message"]); String::new() }
+                    Err(e) => { error!("WS translate parse: {}", e); String::new() }
+                },
+                Err(e) => { error!("WS translate send: {}", e); String::new() }
+            }
+        } else {
+            String::new()
+        };
+
+        // Speaker ID — acquire and release lock before cleanup
+        let spk_resp = {
+            let mut worker = state.speaker_id.lock().await;
+            worker.send(&format!("identify {}\n", audio_path)).await
+        };
+        let (speaker_id, confidence) = match spk_resp {
+            Ok(resp) if resp.starts_with("IDENTIFIED:") => {
+                let parts: Vec<&str> = resp.split(':').collect();
+                let speaker = parts.get(1).unwrap_or(&"Unknown").to_string();
+                let conf = parts.get(2).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                (speaker, conf)
+            }
+            Ok(resp) => { warn!("WS speaker ID unexpected: {}", resp); ("Unknown".to_string(), 0.0) }
+            Err(e) => { error!("WS speaker ID error: {}", e); ("Unknown".to_string(), 0.0) }
+        };
+
+        // Delete the temp WAV
+        let _ = std::fs::remove_file(&audio_path);
+
+        // Send JSON response frame
+        let response = serde_json::json!({
+            "status": "ok",
+            "transcript": transcript_trimmed,
+            "translation": translation,
+            "detected_lang": detected_lang,
+            "speaker_id": speaker_id,
+            "confidence": confidence,
+        }).to_string();
+
+        if let Err(e) = socket.send(Message::Text(response)).await {
+            error!("WS send error: {}", e);
+            break;
+        }
+    }
 }

@@ -606,7 +606,16 @@ async fn get_settings_handler(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let settings = state.settings.lock().await.clone();
-    Json(settings)
+    // Mask the API key — never return the raw value to the browser
+    let key_indicator = if settings.nemotron_api_key.is_empty() { "" } else { "****" };
+    Json(serde_json::json!({
+        "curated_audio_folder": settings.curated_audio_folder,
+        "min_enrollment_samples": settings.min_enrollment_samples,
+        "max_enrollment_samples": settings.max_enrollment_samples,
+        "nemotron_api_key": key_indicator,
+        "source_language": settings.source_language,
+        "target_language": settings.target_language,
+    }))
 }
 
 async fn update_settings_handler(

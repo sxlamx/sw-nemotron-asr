@@ -762,8 +762,12 @@ async function fetchSettings() {
             settingMinSamples.value = s.min_enrollment_samples;
             settingMaxSamples.value = s.max_enrollment_samples;
             // Populate settings panel fields for API key and language defaults
+            // API key: show placeholder if set, never populate with the masked value
             const settingsApiKey = document.getElementById('settings-nemotron-api-key');
-            if (settingsApiKey && s.nemotron_api_key) settingsApiKey.value = s.nemotron_api_key;
+            if (settingsApiKey) {
+                settingsApiKey.value = '';
+                settingsApiKey.placeholder = s.nemotron_api_key ? 'Key is set — enter new key to update' : 'nvapi-...';
+            }
             const settingsSourceLang = document.getElementById('settings-source-lang');
             if (settingsSourceLang && s.source_language) settingsSourceLang.value = s.source_language;
             const settingsTargetLang = document.getElementById('settings-target-lang');
@@ -784,14 +788,16 @@ async function fetchSettings() {
 }
 
 saveSettingsBtn.addEventListener('click', async () => {
+    const apiKeyInput = document.getElementById('settings-nemotron-api-key').value.trim();
     const patch = {
         curated_audio_folder: settingCuratedFolder.value.trim(),
         min_enrollment_samples: parseInt(settingMinSamples.value, 10),
         max_enrollment_samples: parseInt(settingMaxSamples.value, 10),
-        nemotron_api_key: document.getElementById('settings-nemotron-api-key').value.trim(),
         source_language: document.getElementById('settings-source-lang').value,
         target_language: document.getElementById('settings-target-lang').value,
     };
+    // Only send API key if the user entered a new one (never send empty to avoid clearing stored key)
+    if (apiKeyInput) patch.nemotron_api_key = apiKeyInput;
     if (isNaN(patch.min_enrollment_samples) || isNaN(patch.max_enrollment_samples)
         || patch.min_enrollment_samples < 1 || patch.max_enrollment_samples < 1
         || patch.min_enrollment_samples >= patch.max_enrollment_samples) {

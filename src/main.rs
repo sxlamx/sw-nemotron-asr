@@ -715,9 +715,7 @@ async fn ws_transcribe_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| async move {
-        tokio::spawn(ws_transcribe_loop(socket, state));
-    })
+    ws.on_upgrade(move |socket| ws_transcribe_loop(socket, state))
 }
 
 async fn ws_transcribe_loop(mut socket: WebSocket, state: Arc<AppState>) {
@@ -736,6 +734,7 @@ async fn ws_transcribe_loop(mut socket: WebSocket, state: Arc<AppState>) {
 
         // Write audio to a flat temp file (no session directory)
         let audio_path = format!("data/sessions/ws_{}.wav", Uuid::new_v4());
+        let _ = std::fs::create_dir_all("data/sessions");
         if let Err(e) = std::fs::write(&audio_path, &audio_bytes) {
             let errmsg = format!("Failed to write audio: {}", e);
             error!("WS: {}", errmsg);
@@ -861,5 +860,7 @@ async fn ws_transcribe_loop(mut socket: WebSocket, state: Arc<AppState>) {
             error!("WS send error: {}", e);
             break;
         }
+        info!("WS frame processed: speaker={} lang={} confidence={:.4} transcript={:?}",
+            speaker_id, detected_lang, confidence, transcript_trimmed);
     }
 }

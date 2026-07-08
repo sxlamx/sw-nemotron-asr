@@ -655,6 +655,134 @@
             margin-top: 0.4rem;
             min-height: 1.2em;
         }
+
+        /* Language Selectors */
+        .lang-selectors {
+            display: flex;
+            align-items: flex-end;
+            gap: 0.75rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .lang-select-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.3rem;
+        }
+
+        .lang-select-group label {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+            font-weight: 600;
+            font-family: var(--font-mono);
+        }
+
+        .lang-select {
+            padding: 0.45rem 0.75rem;
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border-color);
+            color: var(--text-color);
+            font-family: var(--font-main);
+            font-size: 0.875rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            min-width: 120px;
+        }
+
+        .lang-select:focus {
+            outline: none;
+            border-color: var(--primary-color);
+            box-shadow: 0 0 8px var(--primary-glow);
+        }
+
+        .lang-select option {
+            background: #1a1d26;
+            color: var(--text-color);
+        }
+
+        .lang-arrow {
+            font-size: 1.1rem;
+            color: var(--primary-color);
+            padding-bottom: 0.55rem;
+        }
+
+        /* Live Transcript Panel */
+        .live-transcript-panel {
+            margin-top: 1.5rem;
+            padding: 1.25rem 1.5rem;
+            background: rgba(0, 0, 0, 0.25);
+            border-radius: 12px;
+            border: 1px solid rgba(0, 242, 254, 0.15);
+        }
+
+        .live-transcript-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.85rem;
+            padding-bottom: 0.75rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .live-lang-label {
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+            font-weight: 700;
+            color: var(--primary-color);
+            letter-spacing: 0.5px;
+        }
+
+        .live-processing-indicator {
+            font-size: 0.8rem;
+            color: var(--secondary-color);
+            font-family: var(--font-mono);
+            animation: pulse-border 1.5s infinite;
+        }
+
+        .live-section-label {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+            color: var(--text-muted);
+            font-family: var(--font-mono);
+            font-weight: 600;
+            margin-bottom: 0.35rem;
+        }
+
+        .live-original-text {
+            font-size: 1.05rem;
+            line-height: 1.55;
+            color: var(--text-color);
+            border-left: 3px solid var(--secondary-color);
+            padding-left: 0.85rem;
+            margin-bottom: 0.85rem;
+            white-space: pre-wrap;
+            min-height: 1.4em;
+        }
+
+        .live-transcript-translation {
+            margin-top: 0.4rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .live-translation-text {
+            font-size: 1.05rem;
+            line-height: 1.55;
+            color: var(--text-color);
+            border-left: 3px solid var(--accent-color);
+            padding-left: 0.85rem;
+            white-space: pre-wrap;
+        }
+
+        .live-speaker-info {
+            font-size: 0.82rem;
+            color: var(--text-muted);
+            font-family: var(--font-mono);
+            margin-top: 0.5rem;
+        }
     </style>
 </head>
 <body>
@@ -677,7 +805,33 @@
 
             <div class="record-section">
                 <div class="status-badge idle" id="rec-status">Idle</div>
-                
+
+                <!-- Language Selectors -->
+                <div class="lang-selectors">
+                    <div class="lang-select-group">
+                        <label for="source-lang">Source</label>
+                        <select id="source-lang" class="lang-select">
+                            <option value="auto" selected>Auto-detect</option>
+                            <option value="en">English</option>
+                            <option value="zh">Chinese</option>
+                            <option value="ms">Malay</option>
+                            <option value="ta">Tamil</option>
+                            <option value="ko">Korean</option>
+                        </select>
+                    </div>
+                    <div class="lang-arrow">→</div>
+                    <div class="lang-select-group">
+                        <label for="target-lang">Target</label>
+                        <select id="target-lang" class="lang-select">
+                            <option value="en" selected>English</option>
+                            <option value="zh">Chinese</option>
+                            <option value="ms">Malay</option>
+                            <option value="ta">Tamil</option>
+                            <option value="ko">Korean</option>
+                        </select>
+                    </div>
+                </div>
+
                 <div class="record-btn-container">
                     <button class="record-btn" id="record-trigger" title="Start Recording">
                         <svg viewBox="0 0 24 24" id="mic-icon">
@@ -712,6 +866,23 @@
                 <div class="aliases-list" id="res-aliases" style="display:none;">
                     <strong>Aliases:</strong> <span id="res-aliases-list"></span>
                 </div>
+            </div>
+
+            <!-- Live Transcript Panel (updated via WebSocket) -->
+            <div id="live-transcript-panel" class="live-transcript-panel" style="display:none;">
+                <div class="live-transcript-header">
+                    <span class="live-lang-label" id="live-lang-label">—</span>
+                    <span class="live-processing-indicator" id="live-processing-indicator" style="display:none;">Processing...</span>
+                </div>
+                <div class="live-transcript-original">
+                    <div class="live-section-label">Original</div>
+                    <div class="live-original-text" id="live-original-text"></div>
+                </div>
+                <div class="live-transcript-translation" id="live-translation-section" style="display:none;">
+                    <div class="live-section-label">Translation</div>
+                    <div class="live-translation-text" id="live-translation-text"></div>
+                </div>
+                <div class="live-speaker-info" id="live-speaker-info"></div>
             </div>
         </div>
 

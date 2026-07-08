@@ -10,6 +10,10 @@ let isRecording = false;
 let recordStartTime = 0;
 let timeIntervalId = null;
 
+// WebSocket state
+let ws = null;
+let wsReconnectTimer = null;
+
 // Visualizer configuration
 const canvas = document.getElementById('visualizer');
 const canvasCtx = canvas.getContext('2d');
@@ -69,13 +73,164 @@ function resizeCanvas() {
 window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
 
-// Initial page load: retrieve speaker database
+// Initial page load
 document.addEventListener('DOMContentLoaded', () => {
     fetchSpeakers();
     fetchSettings();
     fetchSessions();
     drawVisualizerIdle();
+    connectWebSocket();
+    initLangSelectors();
 });
+
+// ─── WebSocket Management ────────────────────────────────────────────────────
+
+function connectWebSocket() {
+    if (wsReconnectTimer) {
+        clearTimeout(wsReconnectTimer);
+        wsReconnectTimer = null;
+    }
+    try {
+        ws = new WebSocket('ws://localhost:3007/ws/transcribe');
+        ws.binaryType = 'arraybuffer';
+
+        ws.onopen = () => {
+            console.log('[WS] Connected to ws://localhost:3007/ws/transcribe');
+        };
+
+        ws.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                displayLiveResult(data);
+            } catch (err) {
+                console.error('[WS] Failed to parse message:', err, event.data);
+            }
+        };
+
+        ws.onerror = (err) => {
+            console.error('[WS] WebSocket error:', err);
+        };
+
+        ws.onclose = (event) => {
+            console.log('[WS] Connection closed (code:', event.code, '). Reconnecting in 3s...');
+            ws = null;
+            wsReconnectTimer = setTimeout(connectWebSocket, 3000);
+        };
+    } catch (err) {
+        console.error('[WS] Failed to create WebSocket:', err);
+        wsReconnectTimer = setTimeout(connectWebSocket, 3000);
+    }
+}
+
+// Send recorded WAV blob via WebSocket; REST fallback when WS is not available
+async function sendAudioViaWS(blob) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        console.warn('[WS] WebSocket not ready — falling back to REST /api/transcribe.');
+        await uploadAndTranscribe(blob);
+        // Re-enable button (uploadAndTranscribe only re-enables on error via resetRecordUI)
+        recordTrigger.disabled = false;
+        return;
+    }
+    showLiveProcessing();
+    try {
+        const arrayBuffer = await blob.arrayBuffer();
+        ws.send(arrayBuffer);
+        // Response arrives asynchronously via ws.onmessage → displayLiveResult
+    } catch (err) {
+        console.error('[WS] Error sending audio:', err);
+        resetRecordUI();
+    }
+}
+
+// Show "Processing..." state in the live transcript panel
+function showLiveProcessing() {
+    const panel = document.getElementById('live-transcript-panel');
+    panel.style.display = 'block';
+    document.getElementById('live-processing-indicator').style.display = 'inline';
+    document.getElementById('live-original-text').textContent = '';
+    document.getElementById('live-translation-section').style.display = 'none';
+    document.getElementById('live-speaker-info').textContent = '';
+    document.getElementById('live-lang-label').textContent = '—';
+}
+
+// Update live transcript panel when WS response arrives
+function displayLiveResult(data) {
+    // Re-enable record button and reset status
+    recordTrigger.disabled = false;
+    recStatus.innerText = 'Idle';
+    recStatus.className = 'status-badge idle';
+
+    const panel = document.getElementById('live-transcript-panel');
+    panel.style.display = 'block';
+    document.getElementById('live-processing-indicator').style.display = 'none';
+
+    // Language route label: detected_lang → target_lang
+    const srcLang = data.detected_lang || document.getElementById('source-lang').value || 'auto';
+    const tgtLang = data.target_lang || document.getElementById('target-lang').value || 'en';
+    document.getElementById('live-lang-label').textContent = `${srcLang} → ${tgtLang}`;
+
+    // Original transcript
+    document.getElementById('live-original-text').textContent = data.transcript || '(No speech detected)';
+
+    // Translation (hidden when empty)
+    if (data.translation) {
+        document.getElementById('live-translation-section').style.display = 'block';
+        document.getElementById('live-translation-text').textContent = data.translation;
+    } else {
+        document.getElementById('live-translation-section').style.display = 'none';
+    }
+
+    // Speaker info
+    const speakerId = data.speaker_id;
+    const confidence = data.confidence;
+    if (speakerId && speakerId !== 'Unknown') {
+        const confStr = confidence && confidence > 0
+            ? ` (${(confidence * 100).toFixed(0)}%)`
+            : '';
+        document.getElementById('live-speaker-info').textContent = `Speaker: ${speakerId}${confStr}`;
+    } else {
+        document.getElementById('live-speaker-info').textContent = 'Speaker: Unknown';
+    }
+
+    // Also update the classic result box and refresh recordings list
+    displayResult(data);
+    fetchSessions();
+}
+
+// ─── Language Selector Init & Handlers ───────────────────────────────────────
+
+function initLangSelectors() {
+    const sourceLang = document.getElementById('source-lang');
+    const targetLang = document.getElementById('target-lang');
+
+    sourceLang.addEventListener('change', async () => {
+        try {
+            await fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ source_language: sourceLang.value })
+            });
+            console.log('[Settings] source_language →', sourceLang.value);
+        } catch (err) {
+            console.error('[Settings] Failed to save source_language:', err);
+        }
+    });
+
+    targetLang.addEventListener('change', async () => {
+        try {
+            await fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ target_language: targetLang.value })
+            });
+            console.log('[Settings] target_language →', targetLang.value);
+        } catch (err) {
+            console.error('[Settings] Failed to save target_language:', err);
+        }
+    });
+}
+
+// ─── Speaker Database ─────────────────────────────────────────────────────────
 
 // Fetch speakers mapping from backend
 async function fetchSpeakers() {
@@ -93,7 +248,7 @@ async function fetchSpeakers() {
 // Populate the speaker profiles dashboard table
 function populateSpeakerTable() {
     speakerTableBody.innerHTML = '';
-    
+
     const keys = Object.keys(speakerAliasesMap);
     if (keys.length === 0) {
         speakerTableBody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: var(--text-muted);">No registered speakers. Record one below!</td></tr>`;
@@ -121,6 +276,8 @@ function escapeHtml(str) {
     if (!str) return '';
     return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
 }
+
+// ─── Visualizer ───────────────────────────────────────────────────────────────
 
 // Visualizer: Draw inactive visual state
 function drawVisualizerIdle() {
@@ -156,25 +313,25 @@ function startVisualizer() {
     function draw() {
         if (!isRecording) return;
         animationFrameId = requestAnimationFrame(draw);
-        
+
         analyserNode.getByteTimeDomainData(dataArray);
-        
+
         canvasCtx.fillStyle = 'rgba(11, 12, 16, 0.2)'; // semi-transparent background to create trailing motion blur
         canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
-        
+
         canvasCtx.lineWidth = 3;
         canvasCtx.strokeStyle = 'rgba(0, 242, 254, 0.85)';
         canvasCtx.shadowBlur = 10;
         canvasCtx.shadowColor = 'var(--primary-color)';
-        
+
         canvasCtx.beginPath();
         const sliceWidth = canvas.width * 1.0 / bufferLength;
         let x = 0;
-        
+
         for (let i = 0; i < bufferLength; i++) {
             const v = dataArray[i] / 128.0;
             const y = v * canvas.height / 2;
-            
+
             if (i === 0) {
                 canvasCtx.moveTo(x, y);
             } else {
@@ -182,17 +339,18 @@ function startVisualizer() {
             }
             x += sliceWidth;
         }
-        
+
         canvasCtx.lineTo(canvas.width, canvas.height / 2);
         canvasCtx.stroke();
-        
+
         // Reset shadow properties for next draw
         canvasCtx.shadowBlur = 0;
     }
     draw();
 }
 
-// WAV generation and header writing
+// ─── WAV Generation ───────────────────────────────────────────────────────────
+
 function writeString(view, offset, string) {
     for (let i = 0; i < string.length; i++) {
         view.setUint8(offset + i, string.charCodeAt(i));
@@ -226,7 +384,8 @@ function bufferToWav(buffer) {
     return new Blob([view], { type: 'audio/wav' });
 }
 
-// Timer functionality
+// ─── Timer ────────────────────────────────────────────────────────────────────
+
 function startTimer() {
     recordStartTime = Date.now();
     timeDisplay.style.display = 'block';
@@ -247,18 +406,20 @@ function stopTimer() {
     timeDisplay.style.display = 'none';
 }
 
+// ─── Audio Recording ──────────────────────────────────────────────────────────
+
 // Setup audio stream capturing
 async function startAudioRecording() {
     try {
         audioBuffer = [];
         // Setup audio context with target sample rate of 16kHz
         audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-        
+
         micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
         sourceNode = audioCtx.createMediaStreamSource(micStream);
         analyserNode = audioCtx.createAnalyser();
-        
+
         // Setup ScriptProcessorNode for recording audio chunks
         scriptNode = audioCtx.createScriptProcessor(4096, 1, 1);
         scriptNode.onaudioprocess = (e) => {
@@ -287,7 +448,7 @@ async function startAudioRecording() {
 async function stopAudioRecording() {
     isRecording = false;
     stopTimer();
-    
+
     if (animationFrameId) {
         cancelAnimationFrame(animationFrameId);
     }
@@ -316,35 +477,35 @@ async function stopAudioRecording() {
     return wavBlob;
 }
 
-// Recording/Transcribing UI workflow
+// ─── Recording Trigger ────────────────────────────────────────────────────────
+
 recordTrigger.addEventListener('click', async () => {
     if (!isRecording) {
         // Start recording
         recordTrigger.classList.add('recording');
         micIcon.style.display = 'none';
         stopIcon.style.display = 'block';
-        
+
         recStatus.innerText = "Recording...";
         recStatus.className = "status-badge recording";
-        
+
         resultBox.style.display = 'none';
-        
+
         await startAudioRecording();
     } else {
         // Stop recording and process
         recordTrigger.classList.remove('recording');
         micIcon.style.display = 'block';
         stopIcon.style.display = 'none';
-        
+
         recStatus.innerText = "Processing ASR & Speaker ID...";
         recStatus.className = "status-badge processing";
-        
+
         recordTrigger.disabled = true;
-        
+
         const audioBlob = await stopAudioRecording();
-        await uploadAndTranscribe(audioBlob);
-        
-        recordTrigger.disabled = false;
+        await sendAudioViaWS(audioBlob);
+        // Button re-enabled by displayLiveResult (WS path) or by sendAudioViaWS (REST fallback)
     }
 });
 
@@ -358,6 +519,8 @@ function resetRecordUI() {
     recStatus.className = "status-badge idle";
     recordTrigger.disabled = false;
 }
+
+// ─── REST Fallback (kept for WS-unavailable situations) ──────────────────────
 
 // Upload WAV to transcription API
 async function uploadAndTranscribe(blob) {
@@ -386,21 +549,23 @@ async function uploadAndTranscribe(blob) {
     }
 }
 
-// Render API transcription response
+// ─── Result Display ───────────────────────────────────────────────────────────
+
+// Render API transcription response into the classic result box
 function displayResult(data) {
     recStatus.innerText = "Idle";
     recStatus.className = "status-badge idle";
 
     resMeta.innerText = `Session ID: ${data.session_id}`;
     resText.innerText = data.transcript || "(No speech detected)";
-    
+
     // Resolve speaker ID using alias map
     const speakerId = data.speaker_id;
     if (speakerId && speakerId !== "Unknown" && speakerAliasesMap[speakerId]) {
         const info = speakerAliasesMap[speakerId];
         resSpeakerName.innerText = info.name;
         resSpeakerBadge.className = "speaker-badge";
-        
+
         if (info.aliases && info.aliases.length > 0) {
             resAliases.style.display = 'block';
             resAliasesList.innerHTML = info.aliases.map(a => `<span>${escapeHtml(a)}</span>`).join('');
@@ -424,7 +589,8 @@ function displayResult(data) {
     resultBox.style.display = 'block';
 }
 
-// Enrollment process
+// ─── Speaker Enrollment ───────────────────────────────────────────────────────
+
 let isEnrollRecording = false;
 let enrollAudioBuffer = [];
 let enrollAudioCtx = null;
@@ -437,7 +603,7 @@ enrollBtn.addEventListener('click', async () => {
     const sId = speakerIdInput.value.trim();
     const sName = speakerNameInput.value.trim();
     const sAliases = speakerAliasesInput.value.trim();
-    
+
     if (!sId || !sName) {
         alert('Please fill out Speaker ID and Display Name.');
         return;
@@ -453,7 +619,7 @@ enrollBtn.addEventListener('click', async () => {
         enrollBtn.style.background = 'linear-gradient(135deg, var(--accent-color), #ff758c)';
         enrollMicStatus.innerText = "RECORDING PROFILE...";
         enrollMicStatus.style.color = "var(--accent-color)";
-        
+
         // Disable other interactions
         recordTrigger.disabled = true;
         speakerIdInput.disabled = true;
@@ -464,10 +630,10 @@ enrollBtn.addEventListener('click', async () => {
             enrollAudioBuffer = [];
             enrollAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
             enrollMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            
+
             enrollSourceNode = enrollAudioCtx.createMediaStreamSource(enrollMicStream);
             enrollScriptNode = enrollAudioCtx.createScriptProcessor(4096, 1, 1);
-            
+
             enrollScriptNode.onaudioprocess = (e) => {
                 if (!isEnrollRecording) return;
                 const channelData = e.inputBuffer.getChannelData(0);
@@ -488,7 +654,7 @@ enrollBtn.addEventListener('click', async () => {
         enrollBtn.disabled = true;
 
         isEnrollRecording = false;
-        
+
         if (enrollScriptNode) {
             enrollScriptNode.disconnect();
             enrollScriptNode = null;
@@ -525,12 +691,12 @@ function resetEnrollUI() {
     enrollBtn.disabled = false;
     enrollMicStatus.innerText = "WAV format (16kHz mono)";
     enrollMicStatus.style.color = "";
-    
+
     recordTrigger.disabled = false;
     speakerIdInput.disabled = false;
     speakerNameInput.disabled = false;
     speakerAliasesInput.disabled = false;
-    
+
     speakerIdInput.value = '';
     speakerNameInput.value = '';
     speakerAliasesInput.value = '';
@@ -567,7 +733,8 @@ async function registerSpeakerProfile(id, name, aliases, audioBlob) {
     }
 }
 
-// Settings functions
+// ─── Settings ─────────────────────────────────────────────────────────────────
+
 async function fetchSettings() {
     try {
         const res = await fetch('/api/settings');
@@ -576,6 +743,15 @@ async function fetchSettings() {
             settingCuratedFolder.value = s.curated_audio_folder;
             settingMinSamples.value = s.min_enrollment_samples;
             settingMaxSamples.value = s.max_enrollment_samples;
+            // Populate language dropdowns from server settings
+            if (s.source_language) {
+                const sourceLang = document.getElementById('source-lang');
+                if (sourceLang) sourceLang.value = s.source_language;
+            }
+            if (s.target_language) {
+                const targetLang = document.getElementById('target-lang');
+                if (targetLang) targetLang.value = s.target_language;
+            }
         }
     } catch (err) {
         console.error('Error fetching settings:', err);
@@ -615,6 +791,8 @@ saveSettingsBtn.addEventListener('click', async () => {
     }
     setTimeout(() => { settingsStatus.innerText = ''; }, 3000);
 });
+
+// ─── Recordings ───────────────────────────────────────────────────────────────
 
 refreshSessionsBtn.addEventListener('click', fetchSessions);
 
@@ -703,14 +881,15 @@ window.confirmSession = async function(sessionId) {
     }
 };
 
-// Modal handling
+// ─── Modal ────────────────────────────────────────────────────────────────────
+
 window.openEditModal = function(id) {
     editingSpeakerId = id;
     const info = speakerAliasesMap[id];
-    
+
     modalDisplayName.value = info.name;
     modalAliases.value = info.aliases.join(', ');
-    
+
     editModal.style.display = 'flex';
 };
 

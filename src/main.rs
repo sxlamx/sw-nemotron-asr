@@ -77,6 +77,8 @@ struct SpeakerUpdate {
 struct TranscribeResponse {
     session_id: String,
     transcript: String,
+    translation: String,
+    detected_lang: String,
     speaker_id: String,
     confidence: f64,
 }
@@ -366,7 +368,7 @@ async fn transcribe_handler(
     }
 
     if audio_bytes.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "Missing audio file field".to_string()));
+        return Err((StatusCode::BAD_REQUEST, "Missing audio field".to_string()));
     }
 
     let timestamp = Local::now().format("%Y-%m-%dT%H-%M-%S").to_string();
@@ -379,42 +381,106 @@ async fn transcribe_handler(
     std::fs::write(&audio_path, &audio_bytes)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let transcript = {
-        let mut model = state.model.lock().await;
-        model.transcribe_file(&audio_path)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("ASR failed: {:?}", e)))?
+    // Get settings once
+    let (source_lang, target_lang, api_key) = {
+        let s = state.settings.lock().await;
+        (s.source_language.clone(), s.target_language.clone(), s.nemotron_api_key.clone())
     };
-    let transcript_trimmed = transcript.trim().to_string();
-    let _ = std::fs::write(format!("{}/transcript.txt", session_dir), &transcript_trimmed);
 
-    let (speaker_id, confidence) = {
-        let mut worker = state.speaker_id.lock().await;
-        match worker.send(&format!("identify {}\n", audio_path)).await {
+    // Transcribe via faster-whisper worker
+    let (transcript, detected_lang) = {
+        let req = serde_json::json!({
+            "cmd": "transcribe",
+            "audio_path": audio_path,
+            "source_lang": source_lang,
+        });
+        let mut astr = state.astr.lock().await;
+        match astr.send(&format!("{}\n", req)).await {
             Ok(resp) => {
-                info!("Speaker ID response: {}", resp);
-                if resp.starts_with("IDENTIFIED:") {
-                    let parts: Vec<&str> = resp.split(':').collect();
-                    let speaker = parts.get(1).unwrap_or(&"Unknown").to_string();
-                    let conf = parts.get(2).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                    (speaker, conf)
-                } else {
-                    warn!("Speaker ID error: {}", resp);
-                    ("Unknown".to_string(), 0.0)
+                match serde_json::from_str::<serde_json::Value>(&resp) {
+                    Ok(v) if v["status"] == "ok" => (
+                        v["text"].as_str().unwrap_or("").to_string(),
+                        v["detected_lang"].as_str().unwrap_or("en").to_string(),
+                    ),
+                    Ok(v) => {
+                        warn!("ASR worker error: {}", v["message"]);
+                        (String::new(), "en".to_string())
+                    }
+                    Err(e) => {
+                        error!("ASR parse error: {}", e);
+                        (String::new(), "en".to_string())
+                    }
                 }
             }
             Err(e) => {
-                error!("Speaker ID worker error: {}", e);
-                ("Unknown".to_string(), 0.0)
+                error!("ASR worker send error: {}", e);
+                (String::new(), "en".to_string())
             }
+        }
+    };
+
+    // Translate via Nemotron API (skip if no key, same language, or empty transcript)
+    let translation = {
+        if !api_key.is_empty() && detected_lang != target_lang && !transcript.is_empty() {
+            let req = serde_json::json!({
+                "cmd": "translate",
+                "text": transcript,
+                "source_lang": detected_lang,
+                "target_lang": target_lang,
+                "api_key": api_key,
+            });
+            let mut astr = state.astr.lock().await;
+            match astr.send(&format!("{}\n", req)).await {
+                Ok(resp) => {
+                    serde_json::from_str::<serde_json::Value>(&resp)
+                        .ok()
+                        .and_then(|v| v["translation"].as_str().map(|s| s.to_string()))
+                        .unwrap_or_default()
+                }
+                Err(e) => { error!("Translate send error: {}", e); String::new() }
+            }
+        } else {
+            String::new()
+        }
+    };
+
+    // Persist session files
+    let transcript_trimmed = transcript.trim().to_string();
+    let _ = std::fs::write(format!("{}/transcript.txt", session_dir), &transcript_trimmed);
+    let _ = std::fs::write(format!("{}/detected_lang.txt", session_dir), &detected_lang);
+    if !translation.is_empty() {
+        let _ = std::fs::write(format!("{}/translation.txt", session_dir), &translation);
+    }
+
+    // Speaker ID (runs against same audio file)
+    let (speaker_id, confidence) = {
+        let mut worker = state.speaker_id.lock().await;
+        match worker.send(&format!("identify {}\n", audio_path)).await {
+            Ok(resp) if resp.starts_with("IDENTIFIED:") => {
+                let parts: Vec<&str> = resp.split(':').collect();
+                let speaker = parts.get(1).unwrap_or(&"Unknown").to_string();
+                let conf = parts.get(2).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                (speaker, conf)
+            }
+            Ok(resp) => { warn!("Speaker ID unexpected: {}", resp); ("Unknown".to_string(), 0.0) }
+            Err(e) => { error!("Speaker ID error: {}", e); ("Unknown".to_string(), 0.0) }
         }
     };
 
     let _ = std::fs::write(format!("{}/speaker.txt", session_dir), &speaker_id);
     let _ = std::fs::write(format!("{}/confidence.txt", session_dir), confidence.to_string());
 
-    info!("POST /api/transcribe -> session={} speaker={} confidence={:.4} transcript={:?}",
-        session_id, speaker_id, confidence, transcript_trimmed);
-    Ok(Json(TranscribeResponse { session_id, transcript: transcript_trimmed, speaker_id, confidence }))
+    info!("POST /api/transcribe -> session={} speaker={} lang={} confidence={:.4} transcript={:?}",
+        session_id, speaker_id, detected_lang, confidence, transcript_trimmed);
+
+    Ok(Json(TranscribeResponse {
+        session_id,
+        transcript: transcript_trimmed,
+        translation,
+        detected_lang,
+        speaker_id,
+        confidence,
+    }))
 }
 
 async fn enroll_handler(

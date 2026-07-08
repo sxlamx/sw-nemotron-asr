@@ -38,7 +38,6 @@ try:
 except Exception:
     pass  # Best-effort; may still succeed if proxy doesn't intercept
 
-import torch
 from faster_whisper import WhisperModel
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -86,7 +85,7 @@ def cmd_translate(text: str, source_lang: str, target_lang: str, api_key: str) -
         client = OpenAI(
             base_url="https://integrate.api.nvidia.com/v1",
             api_key=api_key,
-            http_client=__import__("httpx").Client(verify=False),
+            http_client=httpx.Client(verify=False),
         )
         lang_names = {
             "zh": "Simplified Chinese", "en": "English",

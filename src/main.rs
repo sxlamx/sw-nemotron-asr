@@ -37,6 +37,7 @@ impl SpeakerIdWorker {
 type AstrWorker = SpeakerIdWorker;
 
 #[derive(Serialize, Deserialize, Clone)]
+#[serde(default)]
 struct AppSettings {
     curated_audio_folder: String,
     min_enrollment_samples: usize,
@@ -243,7 +244,7 @@ async fn main() {
         }
     };
 
-    let mut astr_worker = match spawn_astr_worker(python_path).await {
+    let astr_worker = match spawn_astr_worker(python_path).await {
         Ok(w) => w,
         Err(e) => {
             error!("Failed to start ASR+translate worker: {:?}", e);
@@ -545,6 +546,21 @@ async fn update_settings_handler(
     }
     if let Some(v) = patch.get("max_enrollment_samples").and_then(|v| v.as_u64()) {
         settings.max_enrollment_samples = v as usize;
+    }
+    if let Some(v) = patch.get("nemotron_api_key").and_then(|v| v.as_str()) {
+        settings.nemotron_api_key = v.to_string();
+    }
+    let valid_langs = ["auto", "en", "zh", "ms", "ta", "ko"];
+    if let Some(v) = patch.get("source_language").and_then(|v| v.as_str()) {
+        if valid_langs.contains(&v) {
+            settings.source_language = v.to_string();
+        }
+    }
+    let valid_target_langs = ["en", "zh", "ms", "ta", "ko"];
+    if let Some(v) = patch.get("target_language").and_then(|v| v.as_str()) {
+        if valid_target_langs.contains(&v) {
+            settings.target_language = v.to_string();
+        }
     }
     let updated = settings.clone();
     drop(settings);

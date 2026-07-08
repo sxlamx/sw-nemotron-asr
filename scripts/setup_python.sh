@@ -25,4 +25,7 @@ echo "Installing SpeechBrain, PyTorch (CPU-only), torchaudio, and numpy..."
 "$PIP_EXE" install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
 "$PIP_EXE" install speechbrain numpy
 
+echo "Installing faster-whisper, openai, and httpx for ASR/translation worker..."
+"$PIP_EXE" install faster-whisper openai httpx
+
 echo "Python environment setup complete."

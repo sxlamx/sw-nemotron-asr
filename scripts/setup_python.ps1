@@ -23,4 +23,7 @@ Write-Host "Installing SpeechBrain, PyTorch (CPU-only), torchaudio, and numpy...
 Start-Process -FilePath $PipExe -ArgumentList "install torch torchaudio --extra-index-url https://download.pytorch.org/whl/cpu" -Wait -NoNewWindow
 Start-Process -FilePath $PipExe -ArgumentList "install speechbrain numpy" -Wait -NoNewWindow
 
+Write-Host "Installing faster-whisper, openai, and httpx for ASR/translation worker..."
+Start-Process -FilePath $PipExe -ArgumentList "install faster-whisper openai httpx" -Wait -NoNewWindow
+
 Write-Host "Python environment setup complete."

@@ -419,12 +419,14 @@ async fn transcribe_handler(
         }
     };
 
+    let transcript_trimmed = transcript.trim().to_string();
+
     // Translate via Nemotron API (skip if no key, same language, or empty transcript)
     let translation = {
-        if !api_key.is_empty() && detected_lang != target_lang && !transcript.is_empty() {
+        if !api_key.is_empty() && detected_lang != target_lang && !transcript_trimmed.is_empty() {
             let req = serde_json::json!({
                 "cmd": "translate",
-                "text": transcript,
+                "text": transcript_trimmed,
                 "source_lang": detected_lang,
                 "target_lang": target_lang,
                 "api_key": api_key,
@@ -432,10 +434,19 @@ async fn transcribe_handler(
             let mut astr = state.astr.lock().await;
             match astr.send(&format!("{}\n", req)).await {
                 Ok(resp) => {
-                    serde_json::from_str::<serde_json::Value>(&resp)
-                        .ok()
-                        .and_then(|v| v["translation"].as_str().map(|s| s.to_string()))
-                        .unwrap_or_default()
+                    match serde_json::from_str::<serde_json::Value>(&resp) {
+                        Ok(v) if v["status"] == "ok" => {
+                            v["translation"].as_str().unwrap_or("").to_string()
+                        }
+                        Ok(v) => {
+                            warn!("Translate worker error: {}", v["message"]);
+                            String::new()
+                        }
+                        Err(e) => {
+                            error!("Translate parse error: {}", e);
+                            String::new()
+                        }
+                    }
                 }
                 Err(e) => { error!("Translate send error: {}", e); String::new() }
             }
@@ -445,7 +456,6 @@ async fn transcribe_handler(
     };
 
     // Persist session files
-    let transcript_trimmed = transcript.trim().to_string();
     let _ = std::fs::write(format!("{}/transcript.txt", session_dir), &transcript_trimmed);
     let _ = std::fs::write(format!("{}/detected_lang.txt", session_dir), &detected_lang);
     if !translation.is_empty() {

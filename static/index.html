@@ -710,6 +710,76 @@
         }
 
         /* Live Transcript Panel */
+        .hidden { display: none !important; }
+
+        /* Transcript history log */
+        .transcript-history-wrap {
+            margin-top: 1.5rem;
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+        .transcript-history-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.6rem 1rem;
+            background: rgba(0,0,0,0.3);
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+            color: var(--text-muted);
+        }
+        .btn-clear-history {
+            background: none;
+            border: 1px solid var(--border-color);
+            color: var(--text-muted);
+            font-size: 0.7rem;
+            font-family: var(--font-mono);
+            padding: 0.15rem 0.55rem;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .btn-clear-history:hover { color: var(--accent-color); border-color: var(--accent-color); }
+        .transcript-history-list {
+            max-height: 420px;
+            overflow-y: auto;
+            padding: 0.5rem 0;
+            background: rgba(0,0,0,0.15);
+            scroll-behavior: smooth;
+        }
+        .transcript-history-list::-webkit-scrollbar { width: 4px; }
+        .transcript-history-list::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 2px; }
+        .history-entry {
+            display: flex;
+            gap: 0.75rem;
+            align-items: baseline;
+            padding: 0.45rem 1rem;
+            border-bottom: 1px solid rgba(255,255,255,0.03);
+            line-height: 1.5;
+        }
+        .history-entry:last-child { border-bottom: none; }
+        .history-time {
+            font-family: var(--font-mono);
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            white-space: nowrap;
+            min-width: 5ch;
+        }
+        .history-speaker {
+            font-size: 0.72rem;
+            font-family: var(--font-mono);
+            color: var(--primary-color);
+            white-space: nowrap;
+        }
+        .history-text {
+            font-size: 0.92rem;
+            color: var(--text-color);
+            flex: 1;
+        }
+        .history-text.translated { color: var(--secondary-color); }
+
         .live-transcript-panel {
             margin-top: 1.5rem;
             padding: 1.25rem 1.5rem;
@@ -883,6 +953,15 @@
                     <div class="live-translation-text" id="live-translation-text"></div>
                 </div>
                 <div class="live-speaker-info" id="live-speaker-info"></div>
+            </div>
+
+            <!-- Transcript History (tail 100, shows translated text) -->
+            <div class="transcript-history-wrap hidden" id="transcript-history-wrap">
+                <div class="transcript-history-header">
+                    <span>Transcript Log</span>
+                    <button type="button" class="btn-clear-history" id="clear-history-btn">Clear</button>
+                </div>
+                <div class="transcript-history-list" id="transcript-history-list"></div>
             </div>
         </div>
 

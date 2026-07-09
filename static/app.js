@@ -88,6 +88,50 @@ window.addEventListener('beforeunload', () => {
     if (ws) ws.close();
 });
 
+// ─── Transcript History ───────────────────────────────────────────────────────
+
+const MAX_HISTORY = 100;
+let transcriptHistory = [];
+let historyStartTime = null;
+
+function addToHistory(data) {
+    if (!historyStartTime) historyStartTime = Date.now();
+    const elapsed = Math.floor((Date.now() - historyStartTime) / 1000);
+    const mm = String(Math.floor(elapsed / 60)).padStart(2, '0');
+    const ss = String(elapsed % 60).padStart(2, '0');
+    const displayText = data.translation || data.transcript || '';
+    const isTranslated = !!data.translation;
+    if (!displayText) return;
+
+    transcriptHistory.push({ time: `${mm}:${ss}`, text: displayText, isTranslated, speaker: data.speaker_id });
+    if (transcriptHistory.length > MAX_HISTORY) transcriptHistory.shift();
+
+    const wrap = document.getElementById('transcript-history-wrap');
+    const list = document.getElementById('transcript-history-list');
+    wrap.classList.remove('hidden');
+
+    const entry = document.createElement('div');
+    entry.className = 'history-entry';
+    entry.innerHTML = `<span class="history-time">${mm}:${ss}</span>` +
+        (data.speaker_id && data.speaker_id !== 'Unknown'
+            ? `<span class="history-speaker">${escapeHtml(data.speaker_id)}</span>` : '') +
+        `<span class="history-text${isTranslated ? ' translated' : ''}">${escapeHtml(displayText)}</span>`;
+    list.appendChild(entry);
+
+    // Keep only last 100 DOM nodes
+    while (list.children.length > MAX_HISTORY) list.removeChild(list.firstChild);
+    list.scrollTop = list.scrollHeight;
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('clear-history-btn').addEventListener('click', () => {
+        transcriptHistory = [];
+        historyStartTime = null;
+        document.getElementById('transcript-history-list').innerHTML = '';
+        document.getElementById('transcript-history-wrap').classList.add('hidden');
+    });
+});
+
 // ─── WebSocket Management ────────────────────────────────────────────────────
 
 let wsPendingResponse = false;
@@ -209,6 +253,9 @@ function displayLiveResult(data) {
     } else {
         document.getElementById('live-speaker-info').textContent = 'Speaker: Unknown';
     }
+
+    // Append to transcript history log
+    addToHistory(data);
 
     // Also update the classic result box and refresh recordings list
     displayResult(data);

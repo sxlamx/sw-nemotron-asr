@@ -215,44 +215,56 @@ function showLiveProcessing() {
     document.getElementById('live-lang-label').textContent = '—';
 }
 
+// Last captured transcript for retranslate
+let lastCapture = { text: '', detected_lang: '', translation: '' };
+
 // Update live transcript panel when WS response arrives
 function displayLiveResult(data) {
-    // Re-enable record button and reset status
-    recordTrigger.disabled = false;
-    recStatus.innerText = 'Idle';
-    recStatus.className = 'status-badge idle';
+    // Status badge
+    if (isRecording) {
+        recStatus.innerText = 'Listening...';
+        recStatus.className = 'status-badge idle';
+    } else {
+        recordTrigger.disabled = false;
+        recStatus.innerText = 'Idle';
+        recStatus.className = 'status-badge idle';
+    }
 
     const panel = document.getElementById('live-transcript-panel');
-    panel.style.display = 'block';
-    document.getElementById('live-processing-indicator').style.display = 'none';
+    panel.classList.remove('hidden');
+    document.getElementById('live-processing-indicator').classList.add('hidden');
 
-    // Language route label: detected_lang → target_lang
-    const srcLang = data.detected_lang || document.getElementById('source-lang').value || 'auto';
-    const tgtLang = data.target_lang || document.getElementById('target-lang').value || 'en';
-    document.getElementById('live-lang-label').textContent = `${srcLang} → ${tgtLang}`;
+    // Source lang badge
+    const srcLang = data.detected_lang || 'auto';
+    document.getElementById('live-lang-label').textContent = srcLang;
+
+    // Sync live target select to current target-lang dropdown
+    const tgtLang = document.getElementById('target-lang').value;
+    document.getElementById('live-target-select').value = tgtLang;
 
     // Original transcript
     document.getElementById('live-original-text').textContent = data.transcript || '(No speech detected)';
 
-    // Translation (hidden when empty)
+    // Translation — show even if empty (placeholder)
+    const transEl = document.getElementById('live-translation-text');
+    const tSection = document.getElementById('live-translation-section');
     if (data.translation) {
-        document.getElementById('live-translation-section').style.display = 'block';
-        document.getElementById('live-translation-text').textContent = data.translation;
+        transEl.textContent = data.translation;
+        tSection.style.opacity = '1';
     } else {
-        document.getElementById('live-translation-section').style.display = 'none';
+        transEl.textContent = '(No API key set — go to Settings to add NVIDIA key)';
+        transEl.style.color = 'var(--text-muted)';
+        tSection.style.opacity = '0.6';
     }
 
     // Speaker info
-    const speakerId = data.speaker_id;
-    const confidence = data.confidence;
-    if (speakerId && speakerId !== 'Unknown') {
-        const confStr = confidence && confidence > 0
-            ? ` (${(confidence * 100).toFixed(0)}%)`
-            : '';
-        document.getElementById('live-speaker-info').textContent = `Speaker: ${speakerId}${confStr}`;
-    } else {
-        document.getElementById('live-speaker-info').textContent = 'Speaker: Unknown';
-    }
+    const confStr = data.confidence > 0 ? ` · ${(data.confidence * 100).toFixed(0)}%` : '';
+    document.getElementById('live-speaker-info').textContent =
+        `👤 ${data.speaker_id || 'Unknown'}${confStr}`;
+
+    // Store for retranslate
+    lastCapture = { text: data.transcript || '', detected_lang: srcLang, translation: data.translation || '' };
+    document.getElementById('retranslate-btn').disabled = !lastCapture.text;
 
     // Append to transcript history log
     addToHistory(data);
@@ -261,6 +273,70 @@ function displayLiveResult(data) {
     displayResult(data);
     fetchSessions();
 }
+
+// ─── Retranslate ─────────────────────────────────────────────────────────────
+
+async function retranslate() {
+    if (!lastCapture.text) return;
+    const targetLang = document.getElementById('live-target-select').value;
+    const btn = document.getElementById('retranslate-btn');
+    btn.disabled = true;
+    btn.textContent = '⟳ Translating...';
+
+    // Sync target lang everywhere
+    document.getElementById('target-lang').value = targetLang;
+    const stl = document.getElementById('settings-target-lang');
+    if (stl) stl.value = targetLang;
+    await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_language: targetLang }),
+    }).catch(() => {});
+
+    const transEl = document.getElementById('live-translation-text');
+    transEl.textContent = '⟳ Translating...';
+    transEl.style.color = 'var(--text-muted)';
+
+    try {
+        const res = await fetch('/api/translate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                text: lastCapture.text,
+                source_lang: lastCapture.detected_lang,
+                target_lang: targetLang,
+            }),
+        });
+        if (res.ok) {
+            const { translation } = await res.json();
+            transEl.textContent = translation || '(empty)';
+            transEl.style.color = '';
+            lastCapture.translation = translation;
+            // Add to history
+            addToHistory({ ...lastCapture, translation, speaker_id: '', confidence: 0 });
+        } else {
+            const msg = await res.text();
+            transEl.textContent = `Error: ${msg}`;
+        }
+    } catch (err) {
+        transEl.textContent = `Network error: ${err.message}`;
+    }
+    btn.disabled = false;
+    btn.textContent = '↻ Retranslate';
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const retBtn = document.getElementById('retranslate-btn');
+    if (retBtn) {
+        retBtn.disabled = true;
+        retBtn.addEventListener('click', retranslate);
+    }
+    // Changing live target select auto-retranslates
+    const liveTarget = document.getElementById('live-target-select');
+    if (liveTarget) {
+        liveTarget.addEventListener('change', retranslate);
+    }
+});
 
 // ─── Language Selector Init & Handlers ───────────────────────────────────────
 
@@ -471,37 +547,100 @@ function stopTimer() {
     timeDisplay.style.display = 'none';
 }
 
+// ─── Real-time VAD State ─────────────────────────────────────────────────────
+
+const VAD_THRESHOLD      = 0.008;   // RMS energy above this = speech
+const SILENCE_GAP_MS     = 800;     // silence after speech to trigger segment send
+const MIN_UTTERANCE_MS   = 300;     // ignore bursts shorter than this
+const MAX_UTTERANCE_MS   = 15000;   // force-send if utterance exceeds this
+
+let vadState      = 'silence';  // 'silence' | 'speech'
+let utteranceBuf  = [];         // Float32 samples for current utterance
+let speechStart   = null;       // Date.now() when speech began
+let silenceStart  = null;       // Date.now() when silence began after speech
+
+function vadReset() {
+    vadState = 'silence';
+    utteranceBuf = [];
+    speechStart = null;
+    silenceStart = null;
+}
+
+// Send a Float32 samples array as a WAV binary WS frame
+async function sendUtteranceSamples(samples) {
+    if (!samples.length) return;
+    const blob = bufferToWav(samples);
+    const arrayBuffer = await blob.arrayBuffer();
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        wsPendingResponse = true;
+        ws.send(arrayBuffer);
+        recStatus.innerText = 'Processing...';
+        recStatus.className = 'status-badge processing';
+    }
+}
+
 // ─── Audio Recording ──────────────────────────────────────────────────────────
 
-// Setup audio stream capturing
 async function startAudioRecording() {
     try {
-        audioBuffer = [];
-        // Setup audio context with target sample rate of 16kHz
+        vadReset();
         audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-
         micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-        sourceNode = audioCtx.createMediaStreamSource(micStream);
+        sourceNode  = audioCtx.createMediaStreamSource(micStream);
         analyserNode = audioCtx.createAnalyser();
+        scriptNode  = audioCtx.createScriptProcessor(4096, 1, 1);
 
-        // Setup ScriptProcessorNode for recording audio chunks
-        scriptNode = audioCtx.createScriptProcessor(4096, 1, 1);
         scriptNode.onaudioprocess = (e) => {
             if (!isRecording) return;
-            const channelData = e.inputBuffer.getChannelData(0);
-            // Append a copy of the buffer data
-            audioBuffer.push(...channelData);
+            const samples = Array.from(e.inputBuffer.getChannelData(0));
+
+            // Energy VAD
+            const rms = Math.sqrt(samples.reduce((s, x) => s + x * x, 0) / samples.length);
+            const isSpeech = rms > VAD_THRESHOLD;
+
+            if (isSpeech) {
+                if (vadState === 'silence') {
+                    speechStart = Date.now();
+                    vadState = 'speech';
+                    recStatus.innerText = 'Speaking...';
+                    recStatus.className = 'status-badge recording';
+                }
+                utteranceBuf.push(...samples);
+                silenceStart = null;
+            } else {
+                if (vadState === 'speech') {
+                    utteranceBuf.push(...samples); // include trailing silence
+                    if (!silenceStart) silenceStart = Date.now();
+
+                    const silence = Date.now() - silenceStart;
+                    const utteranceDur = Date.now() - speechStart;
+
+                    if (silence >= SILENCE_GAP_MS && utteranceDur >= MIN_UTTERANCE_MS) {
+                        sendUtteranceSamples(utteranceBuf.slice());
+                        vadReset();
+                        recStatus.innerText = 'Listening...';
+                        recStatus.className = 'status-badge idle';
+                    }
+                }
+            }
+
+            // Force-send if utterance runs too long (avoids memory growth)
+            if (utteranceBuf.length >= MAX_UTTERANCE_MS / 1000 * 16000) {
+                sendUtteranceSamples(utteranceBuf.slice());
+                vadReset();
+            }
         };
 
-        // Wire routing
         sourceNode.connect(analyserNode);
         sourceNode.connect(scriptNode);
-        scriptNode.connect(audioCtx.destination); // Required to trigger onaudioprocess in some browsers
+        scriptNode.connect(audioCtx.destination);
 
         isRecording = true;
         startVisualizer();
         startTimer();
+        recStatus.innerText = 'Listening...';
+        recStatus.className = 'status-badge idle';
     } catch (err) {
         console.error('Error starting audio recording:', err);
         alert('Could not access microphone. Please check permissions.');
@@ -509,68 +648,42 @@ async function startAudioRecording() {
     }
 }
 
-// Stop audio stream and return WAV file blob
 async function stopAudioRecording() {
     isRecording = false;
     stopTimer();
 
-    if (animationFrameId) {
-        cancelAnimationFrame(animationFrameId);
+    // Flush any accumulated utterance before closing mic
+    if (utteranceBuf.length > 0 && vadState === 'speech') {
+        await sendUtteranceSamples(utteranceBuf.slice());
     }
+    vadReset();
 
-    if (scriptNode) {
-        scriptNode.disconnect();
-        scriptNode = null;
-    }
-    if (sourceNode) {
-        sourceNode.disconnect();
-        sourceNode = null;
-    }
-    if (micStream) {
-        micStream.getTracks().forEach(track => track.stop());
-        micStream = null;
-    }
-    if (audioCtx) {
-        await audioCtx.close();
-        audioCtx = null;
-    }
+    if (animationFrameId) cancelAnimationFrame(animationFrameId);
+    if (scriptNode)  { scriptNode.disconnect();  scriptNode = null; }
+    if (sourceNode)  { sourceNode.disconnect();  sourceNode = null; }
+    if (micStream)   { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+    if (audioCtx)    { await audioCtx.close();   audioCtx = null; }
 
-    // Convert recorded buffer to 16kHz WAV Blob
-    const wavBlob = bufferToWav(audioBuffer);
-    audioBuffer = [];
     drawVisualizerIdle();
-    return wavBlob;
 }
 
 // ─── Recording Trigger ────────────────────────────────────────────────────────
 
 recordTrigger.addEventListener('click', async () => {
     if (!isRecording) {
-        // Start recording
         recordTrigger.classList.add('recording');
         micIcon.style.display = 'none';
         stopIcon.style.display = 'block';
-
-        recStatus.innerText = "Recording...";
-        recStatus.className = "status-badge recording";
-
         resultBox.style.display = 'none';
-
         await startAudioRecording();
     } else {
-        // Stop recording and process
         recordTrigger.classList.remove('recording');
         micIcon.style.display = 'block';
         stopIcon.style.display = 'none';
-
-        recStatus.innerText = "Processing ASR & Speaker ID...";
-        recStatus.className = "status-badge processing";
-
         recordTrigger.disabled = true;
-
-        const audioBlob = await stopAudioRecording();
-        await sendAudioViaWS(audioBlob);
-        // Button re-enabled by displayLiveResult (WS path) or by sendAudioViaWS (REST fallback)
+        await stopAudioRecording();
+        // Re-enable only after any final WS response, or immediately if nothing pending
+        if (!wsPendingResponse) resetRecordUI();
     }
 });
 

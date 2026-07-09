@@ -278,6 +278,7 @@ async fn main() {
         .route("/api/sessions", get(get_sessions_handler))
         .route("/api/sessions/:session_id/confirm", post(confirm_session_handler))
         .route("/api/settings", get(get_settings_handler).post(update_settings_handler))
+        .route("/api/translate", post(translate_handler))
         .layer(DefaultBodyLimit::max(20 * 1024 * 1024))
         .layer(cors)
         .nest_service("/data", tower_http::services::ServeDir::new("data"))
@@ -600,6 +601,41 @@ async fn update_aliases_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(StatusCode::OK)
+}
+
+async fn translate_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let text = body["text"].as_str().unwrap_or("").to_string();
+    let source_lang = body["source_lang"].as_str().unwrap_or("auto").to_string();
+    let target_lang = body["target_lang"].as_str().unwrap_or("en").to_string();
+    if text.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "text is required".to_string()));
+    }
+    let api_key = state.settings.lock().await.nemotron_api_key.clone();
+    if api_key.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "NVIDIA API key not configured in Settings".to_string()));
+    }
+    let req = serde_json::json!({
+        "cmd": "translate",
+        "text": text,
+        "source_lang": source_lang,
+        "target_lang": target_lang,
+        "api_key": api_key,
+    });
+    let resp = {
+        let mut astr = state.astr.lock().await;
+        astr.send(&format!("{}\n", req)).await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
+    let v: Value = serde_json::from_str(&resp)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if v["status"] == "ok" {
+        Ok(Json(serde_json::json!({"translation": v["translation"]})))
+    } else {
+        Err((StatusCode::BAD_GATEWAY, v["message"].as_str().unwrap_or("translation failed").to_string()))
+    }
 }
 
 async fn get_settings_handler(

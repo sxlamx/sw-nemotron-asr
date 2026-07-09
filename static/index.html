@@ -780,72 +780,113 @@
         }
         .history-text.translated { color: var(--secondary-color); }
 
+        /* ── Live Transcript Panel ── */
         .live-transcript-panel {
             margin-top: 1.5rem;
-            padding: 1.25rem 1.5rem;
-            background: rgba(0, 0, 0, 0.25);
             border-radius: 12px;
-            border: 1px solid rgba(0, 242, 254, 0.15);
+            border: 1px solid rgba(0, 242, 254, 0.25);
+            overflow: hidden;
         }
-
-        .live-transcript-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 0.85rem;
-            padding-bottom: 0.75rem;
+        .live-panel-header {
+            background: rgba(0, 0, 0, 0.35);
+            padding: 0.75rem 1.25rem;
             border-bottom: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
         }
-
-        .live-lang-label {
+        .live-lang-row {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            flex-wrap: wrap;
+        }
+        .live-src-badge {
             font-family: var(--font-mono);
-            font-size: 0.85rem;
+            font-size: 0.95rem;
             font-weight: 700;
             color: var(--primary-color);
-            letter-spacing: 0.5px;
+            background: rgba(0,242,254,0.1);
+            border: 1px solid rgba(0,242,254,0.3);
+            padding: 0.2rem 0.6rem;
+            border-radius: 6px;
+            min-width: 3ch;
+            text-align: center;
         }
-
-        .live-processing-indicator {
-            font-size: 0.8rem;
+        .live-arrow-lbl {
+            color: var(--text-muted);
+            font-size: 1.1rem;
+        }
+        .live-target-select {
+            padding: 0.3rem 0.7rem;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            background: var(--card-bg);
+            color: var(--text-color);
+            font-size: 0.88rem;
+            cursor: pointer;
+        }
+        .live-target-select:focus { outline: none; border-color: var(--primary-color); }
+        .btn-retranslate {
+            background: none;
+            border: 1px solid var(--secondary-color);
             color: var(--secondary-color);
+            font-size: 0.8rem;
             font-family: var(--font-mono);
+            padding: 0.25rem 0.7rem;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+        .btn-retranslate:hover { background: rgba(0,255,200,0.1); }
+        .btn-retranslate:disabled { opacity: 0.4; cursor: not-allowed; }
+        .live-meta-row {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            font-size: 0.8rem;
+        }
+        .live-speaker-badge {
+            font-family: var(--font-mono);
+            color: var(--text-muted);
+        }
+        .live-processing {
+            font-family: var(--font-mono);
+            color: var(--secondary-color);
             animation: pulse-border 1.5s infinite;
         }
-
-        .live-section-label {
-            font-size: 0.7rem;
+        /* Two-column body */
+        .live-panel-body {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0;
+            background: rgba(0,0,0,0.18);
+        }
+        @media (max-width: 640px) { .live-panel-body { grid-template-columns: 1fr; } }
+        .live-col {
+            padding: 1rem 1.25rem;
+        }
+        .live-col + .live-col {
+            border-left: 1px solid var(--border-color);
+        }
+        @media (max-width: 640px) { .live-col + .live-col { border-left: none; border-top: 1px solid var(--border-color); } }
+        .live-col-label {
+            font-size: 0.68rem;
             text-transform: uppercase;
-            letter-spacing: 0.6px;
-            color: var(--text-muted);
+            letter-spacing: 0.7px;
             font-family: var(--font-mono);
             font-weight: 600;
-            margin-bottom: 0.35rem;
+            color: var(--text-muted);
+            margin-bottom: 0.5rem;
         }
-
-        .live-original-text {
+        .live-col-text {
             font-size: 1.05rem;
-            line-height: 1.55;
+            line-height: 1.6;
             color: var(--text-color);
-            border-left: 3px solid var(--secondary-color);
-            padding-left: 0.85rem;
-            margin-bottom: 0.85rem;
             white-space: pre-wrap;
-            min-height: 1.4em;
+            min-height: 2.5em;
         }
-
-        .live-transcript-translation {
-            margin-top: 0.4rem;
-            margin-bottom: 0.75rem;
-        }
-
-        .live-translation-text {
-            font-size: 1.05rem;
-            line-height: 1.55;
-            color: var(--text-color);
-            border-left: 3px solid var(--accent-color);
-            padding-left: 0.85rem;
-            white-space: pre-wrap;
-        }
+        .live-col-translated { color: var(--secondary-color); }
 
         .live-speaker-info {
             font-size: 0.82rem;
@@ -939,20 +980,37 @@
             </div>
 
             <!-- Live Transcript Panel (updated via WebSocket) -->
-            <div id="live-transcript-panel" class="live-transcript-panel" style="display:none;">
-                <div class="live-transcript-header">
-                    <span class="live-lang-label" id="live-lang-label">—</span>
-                    <span class="live-processing-indicator" id="live-processing-indicator" style="display:none;">Processing...</span>
+            <div id="live-transcript-panel" class="live-transcript-panel hidden">
+                <!-- Header: source lang → target lang picker + retranslate -->
+                <div class="live-panel-header">
+                    <div class="live-lang-row">
+                        <span id="live-lang-label" class="live-src-badge">—</span>
+                        <span class="live-arrow-lbl">→</span>
+                        <select id="live-target-select" class="live-target-select">
+                            <option value="en">English</option>
+                            <option value="zh">Chinese</option>
+                            <option value="ms">Malay</option>
+                            <option value="ta">Tamil</option>
+                            <option value="ko">Korean</option>
+                        </select>
+                        <button type="button" id="retranslate-btn" class="btn-retranslate" title="Retranslate last transcript to selected language">↻ Retranslate</button>
+                    </div>
+                    <div class="live-meta-row">
+                        <span id="live-speaker-info" class="live-speaker-badge"></span>
+                        <span id="live-processing-indicator" class="live-processing hidden">⟳ Processing...</span>
+                    </div>
                 </div>
-                <div class="live-transcript-original">
-                    <div class="live-section-label">Original</div>
-                    <div class="live-original-text" id="live-original-text"></div>
+                <!-- Body: original + translation -->
+                <div class="live-panel-body">
+                    <div class="live-col">
+                        <div class="live-col-label">Original</div>
+                        <div id="live-original-text" class="live-col-text"></div>
+                    </div>
+                    <div class="live-col" id="live-translation-section">
+                        <div class="live-col-label">Translation</div>
+                        <div id="live-translation-text" class="live-col-text live-col-translated"></div>
+                    </div>
                 </div>
-                <div class="live-transcript-translation" id="live-translation-section" style="display:none;">
-                    <div class="live-section-label">Translation</div>
-                    <div class="live-translation-text" id="live-translation-text"></div>
-                </div>
-                <div class="live-speaker-info" id="live-speaker-info"></div>
             </div>
 
             <!-- Transcript History (tail 100, shows translated text) -->

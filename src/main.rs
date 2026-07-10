@@ -2,9 +2,10 @@ use chrono::Local;
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 use axum::{
-    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, DefaultBodyLimit, Multipart, Path, State},
+    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, DefaultBodyLimit, Multipart, Path, Request, State},
     http::{header, Method, StatusCode},
-    response::IntoResponse,
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -43,8 +44,11 @@ struct AppSettings {
     min_enrollment_samples: usize,
     max_enrollment_samples: usize,
     nemotron_api_key: String,
-    source_language: String,   // "auto", "en", "zh", "ms", "ta", "ko"
-    target_language: String,   // "en", "zh", "ms", "ta", "ko"
+    source_language: String,
+    target_language: String,
+    translation_provider: String, // "nemotron" | "ollama" | "whisper"
+    ollama_host: String,
+    ollama_model: String,
 }
 
 impl Default for AppSettings {
@@ -56,6 +60,9 @@ impl Default for AppSettings {
             nemotron_api_key: String::new(),
             source_language: "auto".to_string(),
             target_language: "en".to_string(),
+            translation_provider: "nemotron".to_string(),
+            ollama_host: "http://192.168.1.230:11433".to_string(),
+            ollama_model: String::new(),
         }
     }
 }
@@ -220,6 +227,15 @@ async fn scan_and_enroll_curated(worker: &mut SpeakerIdWorker, curated_folder: &
     }
 }
 
+async fn no_cache_middleware(req: Request, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store, must-revalidate"),
+    );
+    resp
+}
+
 #[tokio::main]
 async fn main() {
     // Logs to terminal (with colour) AND logs/server.log.YYYY-MM-DD (plain text, date-rolled)
@@ -279,11 +295,13 @@ async fn main() {
         .route("/api/sessions/:session_id/confirm", post(confirm_session_handler))
         .route("/api/settings", get(get_settings_handler).post(update_settings_handler))
         .route("/api/translate", post(translate_handler))
+        .route("/api/ollama/models", get(get_ollama_models_handler))
         .layer(DefaultBodyLimit::max(20 * 1024 * 1024))
         .layer(cors)
         .nest_service("/data", tower_http::services::ServeDir::new("data"))
         .nest_service("/", tower_http::services::ServeDir::new("static"))
-        .with_state(shared_state);
+        .with_state(shared_state)
+        .layer(middleware::from_fn(no_cache_middleware));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3007").await.unwrap();
     info!("AuraNemotron ASR backend is running on http://127.0.0.1:3007");
@@ -384,9 +402,10 @@ async fn transcribe_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Get settings once
-    let (source_lang, target_lang, api_key) = {
+    let (source_lang, target_lang, api_key, provider, ollama_host, ollama_model) = {
         let s = state.settings.lock().await;
-        (s.source_language.clone(), s.target_language.clone(), s.nemotron_api_key.clone())
+        (s.source_language.clone(), s.target_language.clone(), s.nemotron_api_key.clone(),
+         s.translation_provider.clone(), s.ollama_host.clone(), s.ollama_model.clone())
     };
 
     // Transcribe via faster-whisper worker
@@ -423,38 +442,37 @@ async fn transcribe_handler(
 
     let transcript_trimmed = transcript.trim().to_string();
 
-    // Translate via Nemotron API (skip if no key, same language, or empty transcript)
-    let translation = {
-        if !api_key.is_empty() && detected_lang != target_lang && !transcript_trimmed.is_empty() {
-            let req = serde_json::json!({
-                "cmd": "translate",
-                "text": transcript_trimmed,
-                "source_lang": detected_lang,
-                "target_lang": target_lang,
-                "api_key": api_key,
-            });
-            let mut astr = state.astr.lock().await;
-            match astr.send(&format!("{}\n", req)).await {
-                Ok(resp) => {
-                    match serde_json::from_str::<serde_json::Value>(&resp) {
-                        Ok(v) if v["status"] == "ok" => {
-                            v["translation"].as_str().unwrap_or("").to_string()
-                        }
-                        Ok(v) => {
-                            warn!("Translate worker error: {}", v["message"]);
-                            String::new()
-                        }
-                        Err(e) => {
-                            error!("Translate parse error: {}", e);
-                            String::new()
-                        }
-                    }
-                }
-                Err(e) => { error!("Translate send error: {}", e); String::new() }
-            }
-        } else {
-            String::new()
+    // Translate (provider-aware: nemotron/ollama/whisper)
+    let should_translate = !transcript_trimmed.is_empty() && detected_lang != target_lang
+        && match provider.as_str() {
+            "nemotron" => !api_key.is_empty(),
+            "ollama"   => true,
+            "whisper"  => target_lang == "en",
+            _          => false,
+        };
+    let translation = if should_translate {
+        let req = serde_json::json!({
+            "cmd": "translate",
+            "text": transcript_trimmed,
+            "source_lang": detected_lang,
+            "target_lang": target_lang,
+            "provider": provider,
+            "api_key": api_key,
+            "audio_path": audio_path,
+            "ollama_host": ollama_host,
+            "ollama_model": ollama_model,
+        });
+        let mut astr = state.astr.lock().await;
+        match astr.send(&format!("{}\n", req)).await {
+            Ok(resp) => match serde_json::from_str::<serde_json::Value>(&resp) {
+                Ok(v) if v["status"] == "ok" => v["translation"].as_str().unwrap_or("").to_string(),
+                Ok(v) => { warn!("Translate worker error: {}", v["message"]); String::new() }
+                Err(e) => { error!("Translate parse error: {}", e); String::new() }
+            },
+            Err(e) => { error!("Translate send error: {}", e); String::new() }
         }
+    } else {
+        String::new()
     };
 
     // Persist session files
@@ -613,8 +631,16 @@ async fn translate_handler(
     if text.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "text is required".to_string()));
     }
-    let api_key = state.settings.lock().await.nemotron_api_key.clone();
-    if api_key.is_empty() {
+    let (api_key, provider, ollama_host, ollama_model) = {
+        let s = state.settings.lock().await;
+        (s.nemotron_api_key.clone(), s.translation_provider.clone(),
+         s.ollama_host.clone(), s.ollama_model.clone())
+    };
+    if provider == "whisper" {
+        return Err((StatusCode::BAD_REQUEST,
+            "Whisper translate requires the original audio — switch to Ollama or Nemotron for retranslation".to_string()));
+    }
+    if provider == "nemotron" && api_key.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "NVIDIA API key not configured in Settings".to_string()));
     }
     let req = serde_json::json!({
@@ -622,7 +648,10 @@ async fn translate_handler(
         "text": text,
         "source_lang": source_lang,
         "target_lang": target_lang,
+        "provider": provider,
         "api_key": api_key,
+        "ollama_host": ollama_host,
+        "ollama_model": ollama_model,
     });
     let resp = {
         let mut astr = state.astr.lock().await;
@@ -638,6 +667,23 @@ async fn translate_handler(
     }
 }
 
+async fn get_ollama_models_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let ollama_host = state.settings.lock().await.ollama_host.clone();
+    let url = format!("{}/api/tags", ollama_host);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .danger_accept_invalid_certs(true)
+        .build()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let resp = client.get(&url).send().await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Could not reach Ollama at {}: {}", ollama_host, e)))?;
+    let json = resp.json::<Value>().await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    Ok(Json(json))
+}
+
 async fn get_settings_handler(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
@@ -651,6 +697,9 @@ async fn get_settings_handler(
         "nemotron_api_key": key_indicator,
         "source_language": settings.source_language,
         "target_language": settings.target_language,
+        "translation_provider": settings.translation_provider,
+        "ollama_host": settings.ollama_host,
+        "ollama_model": settings.ollama_model,
     }))
 }
 
@@ -683,6 +732,18 @@ async fn update_settings_handler(
         if valid_target_langs.contains(&v) {
             settings.target_language = v.to_string();
         }
+    }
+    let valid_providers = ["nemotron", "ollama", "whisper"];
+    if let Some(v) = patch.get("translation_provider").and_then(|v| v.as_str()) {
+        if valid_providers.contains(&v) {
+            settings.translation_provider = v.to_string();
+        }
+    }
+    if let Some(v) = patch.get("ollama_host").and_then(|v| v.as_str()) {
+        settings.ollama_host = v.to_string();
+    }
+    if let Some(v) = patch.get("ollama_model").and_then(|v| v.as_str()) {
+        settings.ollama_model = v.to_string();
     }
     let updated = settings.clone();
     drop(settings);
@@ -790,9 +851,10 @@ async fn ws_transcribe_loop(mut socket: WebSocket, state: Arc<AppState>) {
         }
 
         // Read settings once; drop lock immediately
-        let (source_lang, target_lang, api_key) = {
+        let (source_lang, target_lang, api_key, provider, ollama_host, ollama_model) = {
             let s = state.settings.lock().await;
-            (s.source_language.clone(), s.target_language.clone(), s.nemotron_api_key.clone())
+            (s.source_language.clone(), s.target_language.clone(), s.nemotron_api_key.clone(),
+             s.translation_provider.clone(), s.ollama_host.clone(), s.ollama_model.clone())
         };
 
         // Transcribe — acquire and release the astr lock before any further awaits
@@ -842,17 +904,25 @@ async fn ws_transcribe_loop(mut socket: WebSocket, state: Arc<AppState>) {
             }
         };
 
-        // Translate via Nemotron (skip if no key, same lang, or empty transcript)
-        let translation = if !api_key.is_empty()
-            && detected_lang != target_lang
-            && !transcript_trimmed.is_empty()
-        {
+        // Translate (provider-aware)
+        let ws_should_translate = !transcript_trimmed.is_empty() && detected_lang != target_lang
+            && match provider.as_str() {
+                "nemotron" => !api_key.is_empty(),
+                "ollama"   => true,
+                "whisper"  => target_lang == "en",
+                _          => false,
+            };
+        let translation = if ws_should_translate {
             let trans_req = serde_json::json!({
                 "cmd": "translate",
                 "text": transcript_trimmed,
                 "source_lang": detected_lang,
                 "target_lang": target_lang,
+                "provider": provider,
                 "api_key": api_key,
+                "audio_path": audio_path,
+                "ollama_host": ollama_host,
+                "ollama_model": ollama_model,
             }).to_string();
             let trans_resp = {
                 let mut astr = state.astr.lock().await;
@@ -860,9 +930,7 @@ async fn ws_transcribe_loop(mut socket: WebSocket, state: Arc<AppState>) {
             };
             match trans_resp {
                 Ok(resp) => match serde_json::from_str::<Value>(&resp) {
-                    Ok(v) if v["status"] == "ok" => {
-                        v["translation"].as_str().unwrap_or("").to_string()
-                    }
+                    Ok(v) if v["status"] == "ok" => v["translation"].as_str().unwrap_or("").to_string(),
                     Ok(v) => { warn!("WS translate error: {}", v["message"]); String::new() }
                     Err(e) => { error!("WS translate parse: {}", e); String::new() }
                 },

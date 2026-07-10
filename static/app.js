@@ -81,6 +81,27 @@ document.addEventListener('DOMContentLoaded', () => {
     drawVisualizerIdle();
     connectWebSocket();
     initLangSelectors();
+
+    // Provider toggle buttons
+    document.querySelectorAll('.provider-btn').forEach(btn => {
+        btn.addEventListener('click', () => setProvider(btn.dataset.provider));
+    });
+
+    // Refresh Ollama models button — saves host first, then fetches
+    const refreshOllamaBtn = document.getElementById('refresh-ollama-models-btn');
+    if (refreshOllamaBtn) {
+        refreshOllamaBtn.addEventListener('click', async () => {
+            const hostEl = document.getElementById('settings-ollama-host');
+            if (hostEl && hostEl.value.trim()) {
+                await fetch('/api/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ollama_host: hostEl.value.trim() }),
+                }).catch(() => {});
+            }
+            fetchOllamaModels();
+        });
+    }
 });
 
 window.addEventListener('beforeunload', () => {
@@ -913,6 +934,50 @@ async function registerSpeakerProfile(id, name, aliases, audioBlob) {
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
+async function fetchOllamaModels() {
+    const sel = document.getElementById('settings-ollama-model');
+    if (!sel) return;
+    const currentVal = sel.dataset.current || sel.value;
+    sel.innerHTML = '<option value="">Loading…</option>';
+    try {
+        const res = await fetch('/api/ollama/models');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const models = (data.models || []).map(m => m.name || m.model || m).filter(Boolean);
+        if (models.length === 0) {
+            sel.innerHTML = '<option value="">No models found</option>';
+            return;
+        }
+        sel.innerHTML = '<option value="">— select model —</option>' +
+            models.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('');
+        if (currentVal) sel.value = currentVal;
+    } catch (e) {
+        sel.innerHTML = '<option value="">Could not reach Ollama server</option>';
+    }
+}
+
+function setProvider(p) {
+    document.querySelectorAll('.provider-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.provider === p);
+    });
+    const isWhisper = p === 'whisper';
+    const liveTarget = document.getElementById('live-target-select');
+    const targetLang = document.getElementById('target-lang');
+    const settingsTargetLang = document.getElementById('settings-target-lang');
+    const whisperNote = document.getElementById('whisper-en-note');
+    const retBtn = document.getElementById('retranslate-btn');
+    if (liveTarget) liveTarget.disabled = isWhisper;
+    if (targetLang) targetLang.disabled = isWhisper;
+    if (settingsTargetLang) settingsTargetLang.disabled = isWhisper;
+    if (whisperNote) whisperNote.classList.toggle('hidden', !isWhisper);
+    if (retBtn) retBtn.disabled = isWhisper || !lastCapture.text;
+    fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ translation_provider: p }),
+    }).catch(e => console.error('Failed to save provider:', e));
+}
+
 async function fetchSettings() {
     try {
         const res = await fetch('/api/settings');
@@ -921,7 +986,6 @@ async function fetchSettings() {
             settingCuratedFolder.value = s.curated_audio_folder;
             settingMinSamples.value = s.min_enrollment_samples;
             settingMaxSamples.value = s.max_enrollment_samples;
-            // Populate settings panel fields for API key and language defaults
             // API key: show placeholder if set, never populate with the masked value
             const settingsApiKey = document.getElementById('settings-nemotron-api-key');
             if (settingsApiKey) {
@@ -932,7 +996,6 @@ async function fetchSettings() {
             if (settingsSourceLang && s.source_language) settingsSourceLang.value = s.source_language;
             const settingsTargetLang = document.getElementById('settings-target-lang');
             if (settingsTargetLang && s.target_language) settingsTargetLang.value = s.target_language;
-            // Populate recording-area language dropdowns from server settings
             if (s.source_language) {
                 const sourceLang = document.getElementById('source-lang');
                 if (sourceLang) sourceLang.value = s.source_language;
@@ -941,6 +1004,14 @@ async function fetchSettings() {
                 const targetLang = document.getElementById('target-lang');
                 if (targetLang) targetLang.value = s.target_language;
             }
+            // Provider toggle
+            if (s.translation_provider) setProvider(s.translation_provider);
+            // Ollama settings
+            const ollamaHost = document.getElementById('settings-ollama-host');
+            if (ollamaHost && s.ollama_host) ollamaHost.value = s.ollama_host;
+            const ollamaModelSel = document.getElementById('settings-ollama-model');
+            if (ollamaModelSel && s.ollama_model) ollamaModelSel.dataset.current = s.ollama_model;
+            if (s.translation_provider === 'ollama') fetchOllamaModels();
         }
     } catch (err) {
         console.error('Error fetching settings:', err);
@@ -956,8 +1027,11 @@ saveSettingsBtn.addEventListener('click', async () => {
         source_language: document.getElementById('settings-source-lang').value,
         target_language: document.getElementById('settings-target-lang').value,
     };
-    // Only send API key if the user entered a new one (never send empty to avoid clearing stored key)
     if (apiKeyInput) patch.nemotron_api_key = apiKeyInput;
+    const ollamaHostEl = document.getElementById('settings-ollama-host');
+    if (ollamaHostEl && ollamaHostEl.value.trim()) patch.ollama_host = ollamaHostEl.value.trim();
+    const ollamaModelEl = document.getElementById('settings-ollama-model');
+    if (ollamaModelEl && ollamaModelEl.value) patch.ollama_model = ollamaModelEl.value;
     if (isNaN(patch.min_enrollment_samples) || isNaN(patch.max_enrollment_samples)
         || patch.min_enrollment_samples < 1 || patch.max_enrollment_samples < 1
         || patch.min_enrollment_samples >= patch.max_enrollment_samples) {

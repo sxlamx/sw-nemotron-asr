@@ -840,6 +840,54 @@
         }
         .btn-retranslate:hover { background: rgba(0,255,200,0.1); }
         .btn-retranslate:disabled { opacity: 0.4; cursor: not-allowed; }
+        .live-provider-row {
+            display: flex;
+            align-items: center;
+            gap: 0.35rem;
+        }
+        .provider-btn {
+            font-family: var(--font-mono);
+            font-size: 0.72rem;
+            font-weight: 600;
+            padding: 0.25rem 0.65rem;
+            border-radius: 6px;
+            border: 1px solid rgba(255,255,255,0.15);
+            background: rgba(255,255,255,0.04);
+            color: var(--text-muted);
+            cursor: pointer;
+            transition: all 0.15s;
+            letter-spacing: 0.3px;
+        }
+        .provider-btn:hover { border-color: var(--primary-color); color: var(--primary-color); }
+        .provider-btn.active {
+            background: rgba(0,242,254,0.12);
+            border-color: var(--primary-color);
+            color: var(--primary-color);
+        }
+        .whisper-en-note {
+            font-size: 0.72rem;
+            color: var(--accent-color);
+            margin-left: 0.4rem;
+        }
+        .ollama-host-row {
+            display: flex;
+            gap: 0.5rem;
+            align-items: center;
+        }
+        .ollama-host-row input { flex: 1; }
+        .btn-sm {
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            padding: 0.35rem 0.8rem;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+            background: rgba(255,255,255,0.05);
+            color: var(--text-muted);
+            cursor: pointer;
+            white-space: nowrap;
+            transition: all 0.15s;
+        }
+        .btn-sm:hover { border-color: var(--primary-color); color: var(--primary-color); }
         .live-meta-row {
             display: flex;
             align-items: center;
@@ -995,6 +1043,12 @@
                         </select>
                         <button type="button" id="retranslate-btn" class="btn-retranslate" title="Retranslate last transcript to selected language">↻ Retranslate</button>
                     </div>
+                    <div class="live-provider-row">
+                        <button type="button" class="provider-btn active" data-provider="nemotron" id="provider-nemotron">Nemotron</button>
+                        <button type="button" class="provider-btn" data-provider="ollama" id="provider-ollama">Ollama</button>
+                        <button type="button" class="provider-btn" data-provider="whisper" id="provider-whisper">Whisper→EN</button>
+                        <span id="whisper-en-note" class="whisper-en-note hidden">English only</span>
+                    </div>
                     <div class="live-meta-row">
                         <span id="live-speaker-info" class="live-speaker-badge"></span>
                         <span id="live-processing-indicator" class="live-processing hidden">⟳ Processing...</span>
@@ -1131,6 +1185,19 @@
                 <div class="form-group" style="margin-bottom:0;">
                     <label for="settings-nemotron-api-key">NVIDIA Nemotron API Key</label>
                     <input type="password" id="settings-nemotron-api-key" class="form-control" placeholder="nvapi-..." autocomplete="off">
+                </div>
+                <div class="form-group" style="margin-bottom:0;">
+                    <label for="settings-ollama-host">Ollama Host</label>
+                    <div class="ollama-host-row">
+                        <input type="text" id="settings-ollama-host" class="form-control" placeholder="http://192.168.1.230:11433">
+                        <button type="button" id="refresh-ollama-models-btn" class="btn-sm">⟳ Refresh Models</button>
+                    </div>
+                </div>
+                <div class="form-group" style="margin-bottom:0;">
+                    <label for="settings-ollama-model">Ollama Model</label>
+                    <select id="settings-ollama-model" class="form-control">
+                        <option value="">— click Refresh Models —</option>
+                    </select>
                 </div>
                 <div class="form-group" style="margin-bottom:0;">
                     <label for="settings-source-lang">Default Source Language</label>

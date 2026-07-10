@@ -73,38 +73,72 @@ def cmd_transcribe(audio_path: str, source_lang: str) -> dict:
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-def cmd_translate(text: str, source_lang: str, target_lang: str, api_key: str) -> dict:
+_LANG_NAMES = {
+    "zh": "Simplified Chinese", "en": "English",
+    "ms": "Malay", "ta": "Tamil", "ko": "Korean",
+}
+
+def _llm_translate(client, model: str, text: str, source_lang: str, target_lang: str) -> dict:
+    src_name = _LANG_NAMES.get(source_lang, source_lang)
+    tgt_name = _LANG_NAMES.get(target_lang, target_lang)
+    prompt = (
+        f"Translate the following {src_name} text to {tgt_name}. "
+        f"Output only the translation, no explanations.\n\nText: {text}"
+    )
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.1,
+        max_tokens=512,
+    )
+    return {"status": "ok", "translation": resp.choices[0].message.content.strip()}
+
+def cmd_translate(payload: dict) -> dict:
+    text = payload.get("text", "")
+    source_lang = payload.get("source_lang", "auto")
+    target_lang = payload.get("target_lang", "en")
+    provider = payload.get("provider", "nemotron")
+
     if not text.strip():
         return {"status": "ok", "translation": ""}
     if source_lang == target_lang:
         return {"status": "ok", "translation": text}
-    if not api_key:
-        return {"status": "error", "message": "No Nemotron API key configured"}
+
     try:
-        from openai import OpenAI
-        client = OpenAI(
-            base_url="https://integrate.api.nvidia.com/v1",
-            api_key=api_key,
-            http_client=httpx.Client(verify=False),
-        )
-        lang_names = {
-            "zh": "Simplified Chinese", "en": "English",
-            "ms": "Malay", "ta": "Tamil", "ko": "Korean",
-        }
-        src_name = lang_names.get(source_lang, source_lang)
-        tgt_name = lang_names.get(target_lang, target_lang)
-        prompt = (
-            f"Translate the following {src_name} text to {tgt_name}. "
-            f"Output only the translation, no explanations.\n\nText: {text}"
-        )
-        resp = client.chat.completions.create(
-            model="nvidia/llama-3.1-nemotron-70b-instruct",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
-            max_tokens=512,
-        )
-        translation = resp.choices[0].message.content.strip()
-        return {"status": "ok", "translation": translation}
+        if provider == "whisper":
+            audio_path = payload.get("audio_path", "")
+            if not audio_path or not os.path.exists(audio_path):
+                return {"status": "error", "message": "audio_path missing for whisper translate"}
+            model = get_whisper_model()
+            lang_arg = None if source_lang == "auto" else source_lang
+            segments, _ = model.transcribe(audio_path, task="translate", language=lang_arg, beam_size=5)
+            translated = " ".join(s.text.strip() for s in segments).strip()
+            return {"status": "ok", "translation": translated}
+
+        elif provider == "ollama":
+            from openai import OpenAI
+            ollama_host = payload.get("ollama_host", "http://192.168.1.230:11433")
+            ollama_model = payload.get("ollama_model", "") or "llama3.2:3b"
+            client = OpenAI(
+                base_url=f"{ollama_host}/v1",
+                api_key="ollama",
+                http_client=httpx.Client(verify=False),
+            )
+            return _llm_translate(client, ollama_model, text, source_lang, target_lang)
+
+        else:  # nemotron
+            from openai import OpenAI
+            api_key = payload.get("api_key", "")
+            if not api_key:
+                return {"status": "error", "message": "No Nemotron API key configured"}
+            client = OpenAI(
+                base_url="https://integrate.api.nvidia.com/v1",
+                api_key=api_key,
+                http_client=httpx.Client(verify=False),
+            )
+            return _llm_translate(client, "nvidia/llama-3.1-nemotron-70b-instruct",
+                                   text, source_lang, target_lang)
+
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -121,9 +155,7 @@ def run_persistent():
             if cmd == "transcribe":
                 result = cmd_transcribe(req["audio_path"], req.get("source_lang", "auto"))
             elif cmd == "translate":
-                result = cmd_translate(
-                    req["text"], req["source_lang"], req["target_lang"], req.get("api_key", "")
-                )
+                result = cmd_translate(req)
             else:
                 result = {"status": "error", "message": f"unknown cmd: {cmd}"}
         except Exception as e:

@@ -56,6 +56,7 @@ struct AppSettings {
     whisper_model: String,        // e.g. "small" | "large-v3-turbo"
     whisper_device: String,       // "cpu" | "cuda"
     use_speaker_direction: bool,  // run speaker-ID in conversation mode
+    auth_enabled: bool,           // require login for /api, /ws, /data
 }
 
 impl Default for AppSettings {
@@ -77,8 +78,16 @@ impl Default for AppSettings {
             whisper_model: "large-v3-turbo".to_string(),
             whisper_device: "cpu".to_string(),
             use_speaker_direction: false,
+            auth_enabled: true,
         }
     }
+}
+
+#[derive(Clone)]
+struct AuthSession {
+    username: String,
+    role: String, // "admin" | "clinician"
+    expires_at: std::time::Instant,
 }
 
 struct AppState {
@@ -87,6 +96,178 @@ struct AppState {
     settings: Mutex<AppSettings>,
     glossary: Mutex<Value>,    // physio term KB: data/glossary.json
     corrections: Mutex<Value>, // clinician translation fixes: data/corrections.json
+    users: Mutex<Value>,       // login accounts: data/users.json
+    tokens: Mutex<std::collections::HashMap<String, AuthSession>>,
+}
+
+const USERS_PATH: &str = "data/users.json";
+const SESSION_COOKIE: &str = "aura_sid";
+const SESSION_TTL_SECS: u64 = 12 * 60 * 60;
+
+// Mock POC accounts created on first run (documented in the demo runbook)
+fn seed_users_if_missing() {
+    use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
+    if std::path::Path::new(USERS_PATH).exists() {
+        return;
+    }
+    let argon = argon2::Argon2::default();
+    let mut users = Vec::new();
+    for (username, password, role) in [
+        ("admin", "nuh-admin-poc", "admin"),
+        ("sarah", "nuh-demo-poc", "clinician"),
+    ] {
+        let salt = SaltString::generate(&mut OsRng);
+        match argon.hash_password(password.as_bytes(), &salt) {
+            Ok(hash) => users.push(serde_json::json!({
+                "username": username,
+                "password_hash": hash.to_string(),
+                "role": role,
+            })),
+            Err(e) => error!("Failed to hash seed password for {}: {}", username, e),
+        }
+    }
+    save_json_array(USERS_PATH, &Value::Array(users));
+    info!("Seeded mock POC accounts in {} (admin/nuh-admin-poc, sarah/nuh-demo-poc)", USERS_PATH);
+}
+
+fn extract_session_cookie(req: &Request) -> Option<String> {
+    let cookies = req.headers().get(header::COOKIE)?.to_str().ok()?;
+    for pair in cookies.split(';') {
+        let mut it = pair.trim().splitn(2, '=');
+        if it.next() == Some(SESSION_COOKIE) {
+            return it.next().map(|v| v.to_string());
+        }
+    }
+    None
+}
+
+// Guard /api, /ws and /data behind a session cookie; static shell stays
+// public so the login page itself can load. Admin-only: settings writes
+// and glossary deletion.
+async fn auth_middleware(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let auth_enabled = state.settings.lock().await.auth_enabled;
+    if !auth_enabled {
+        return next.run(req).await;
+    }
+
+    let path = req.uri().path().to_string();
+    let method = req.method().clone();
+    let protected = (path.starts_with("/api/") || path.starts_with("/ws/") || path.starts_with("/data/"))
+        && path != "/api/login";
+    if !protected {
+        return next.run(req).await;
+    }
+
+    let session = match extract_session_cookie(&req) {
+        Some(token) => {
+            let mut tokens = state.tokens.lock().await;
+            match tokens.get(&token) {
+                Some(s) if s.expires_at > std::time::Instant::now() => Some(s.clone()),
+                Some(_) => { tokens.remove(&token); None }
+                None => None,
+            }
+        }
+        None => None,
+    };
+
+    let Some(session) = session else {
+        return (StatusCode::UNAUTHORIZED, "Login required").into_response();
+    };
+
+    let admin_only = (method == Method::POST && path == "/api/settings")
+        || (method == Method::DELETE && path.starts_with("/api/glossary/"));
+    if admin_only && session.role != "admin" {
+        return (StatusCode::FORBIDDEN, "Admin role required").into_response();
+    }
+
+    next.run(req).await
+}
+
+async fn login_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<Value>,
+) -> Response {
+    use argon2::password_hash::{PasswordHash, PasswordVerifier};
+    let username = body["username"].as_str().unwrap_or("").trim().to_string();
+    let password = body["password"].as_str().unwrap_or("");
+    if username.is_empty() || password.is_empty() {
+        return (StatusCode::BAD_REQUEST, "username and password are required").into_response();
+    }
+    let (found_hash, role) = {
+        let users = state.users.lock().await;
+        let user = users.as_array().and_then(|arr| {
+            arr.iter().find(|u| u["username"].as_str() == Some(username.as_str()))
+        });
+        match user {
+            Some(u) => (
+                u["password_hash"].as_str().unwrap_or("").to_string(),
+                u["role"].as_str().unwrap_or("clinician").to_string(),
+            ),
+            None => (String::new(), String::new()),
+        }
+    };
+    let verified = !found_hash.is_empty()
+        && PasswordHash::new(&found_hash)
+            .map(|h| argon2::Argon2::default().verify_password(password.as_bytes(), &h).is_ok())
+            .unwrap_or(false);
+    if !verified {
+        warn!("Failed login attempt for '{}'", username);
+        return (StatusCode::UNAUTHORIZED, "Invalid username or password").into_response();
+    }
+
+    let token = Uuid::new_v4().to_string();
+    state.tokens.lock().await.insert(token.clone(), AuthSession {
+        username: username.clone(),
+        role: role.clone(),
+        expires_at: std::time::Instant::now() + std::time::Duration::from_secs(SESSION_TTL_SECS),
+    });
+    info!("User '{}' logged in ({})", username, role);
+
+    let cookie = format!(
+        "{}={}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}",
+        SESSION_COOKIE, token, SESSION_TTL_SECS
+    );
+    (
+        [(header::SET_COOKIE, cookie)],
+        Json(serde_json::json!({"username": username, "role": role})),
+    ).into_response()
+}
+
+async fn logout_handler(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+) -> Response {
+    if let Some(token) = extract_session_cookie(&req) {
+        state.tokens.lock().await.remove(&token);
+    }
+    let cookie = format!("{}=deleted; HttpOnly; SameSite=Lax; Path=/; Max-Age=0", SESSION_COOKIE);
+    ([(header::SET_COOKIE, cookie)], StatusCode::OK).into_response()
+}
+
+async fn me_handler(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+) -> Response {
+    let auth_enabled = state.settings.lock().await.auth_enabled;
+    if !auth_enabled {
+        return Json(serde_json::json!({"username": "guest", "role": "admin", "auth_enabled": false}))
+            .into_response();
+    }
+    if let Some(token) = extract_session_cookie(&req) {
+        let tokens = state.tokens.lock().await;
+        if let Some(s) = tokens.get(&token) {
+            if s.expires_at > std::time::Instant::now() {
+                return Json(serde_json::json!({
+                    "username": s.username, "role": s.role, "auth_enabled": true
+                })).into_response();
+            }
+        }
+    }
+    (StatusCode::UNAUTHORIZED, "Login required").into_response()
 }
 
 const GLOSSARY_PATH: &str = "data/glossary.json";
@@ -403,12 +584,16 @@ async fn main() {
         }
     }
 
+    seed_users_if_missing();
+
     let shared_state = Arc::new(AppState {
         speaker_id: Mutex::new(worker),
         astr: Mutex::new(astr_worker),
         settings: Mutex::new(settings_val),
         glossary: Mutex::new(load_json_array(GLOSSARY_PATH)),
         corrections: Mutex::new(load_json_array(CORRECTIONS_PATH)),
+        users: Mutex::new(load_json_array(USERS_PATH)),
+        tokens: Mutex::new(std::collections::HashMap::new()),
     });
 
     let cors = tower_http::cors::CorsLayer::new()
@@ -417,6 +602,9 @@ async fn main() {
         .allow_origin(tower_http::cors::Any);
 
     let app = Router::new()
+        .route("/api/login", post(login_handler))
+        .route("/api/logout", post(logout_handler))
+        .route("/api/me", get(me_handler))
         .route("/ws/transcribe", get(ws_transcribe_handler))
         .route("/api/transcribe", post(transcribe_handler))
         .route("/api/speakers/enroll", post(enroll_handler))
@@ -434,6 +622,7 @@ async fn main() {
         .layer(cors)
         .nest_service("/data", tower_http::services::ServeDir::new("data"))
         .nest_service("/", tower_http::services::ServeDir::new("static"))
+        .layer(middleware::from_fn_with_state(shared_state.clone(), auth_middleware))
         .with_state(shared_state)
         .layer(middleware::from_fn(no_cache_middleware));
 
@@ -1003,6 +1192,7 @@ async fn get_settings_handler(
         "whisper_model": settings.whisper_model,
         "whisper_device": settings.whisper_device,
         "use_speaker_direction": settings.use_speaker_direction,
+        "auth_enabled": settings.auth_enabled,
     }))
 }
 
@@ -1054,6 +1244,9 @@ async fn update_settings_handler(
     }
     if let Some(v) = patch.get("use_speaker_direction").and_then(|v| v.as_bool()) {
         settings.use_speaker_direction = v;
+    }
+    if let Some(v) = patch.get("auth_enabled").and_then(|v| v.as_bool()) {
+        settings.auth_enabled = v;
     }
     // Whisper model/device take effect on next server restart (worker spawn)
     let valid_whisper_models = ["small", "medium", "large-v3", "large-v3-turbo", "turbo"];

@@ -73,8 +73,44 @@ function resizeCanvas() {
 window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
 
+// ─── Auth ─────────────────────────────────────────────────────────────────────
+
+let currentUser = null;
+
+async function checkAuth() {
+    try {
+        const res = await fetch('/api/me');
+        if (res.status === 401) {
+            location.href = '/login.html';
+            return false;
+        }
+        if (res.ok) {
+            currentUser = await res.json();
+            const userEl = document.getElementById('header-user');
+            const logoutBtn = document.getElementById('logout-btn');
+            if (currentUser.auth_enabled && userEl) {
+                userEl.textContent = `${currentUser.username} · ${currentUser.role}`;
+                if (logoutBtn) {
+                    logoutBtn.style.display = '';
+                    logoutBtn.addEventListener('click', async () => {
+                        await fetch('/api/logout', { method: 'POST' }).catch(() => {});
+                        location.href = '/login.html';
+                    });
+                }
+            }
+            // Server enforces roles; grey out admin-only controls for clarity
+            if (currentUser.role !== 'admin') {
+                const saveBtn = document.getElementById('save-settings-btn');
+                if (saveBtn) { saveBtn.disabled = true; saveBtn.title = 'Admin role required'; }
+            }
+        }
+    } catch (err) { /* offline — let the page load */ }
+    return true;
+}
+
 // Initial page load
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
+    if (!(await checkAuth())) return;
     fetchSpeakers();
     fetchSettings();
     fetchSessions();

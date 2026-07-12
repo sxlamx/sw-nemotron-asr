@@ -18,15 +18,25 @@ def check(name, condition, detail=""):
     results.append((name, condition))
     return condition
 
-def get(path):
-    req = urllib.request.Request(f"{BASE}{path}")
+COOKIE = ""  # set by login() when auth is enabled
+
+def _headers(extra=None):
+    h = dict(extra or {})
+    if COOKIE:
+        h["Cookie"] = COOKIE
+    return h
+
+def get(path, cookie=None):
+    req = urllib.request.Request(f"{BASE}{path}",
+        headers={"Cookie": cookie} if cookie else _headers())
     with urllib.request.urlopen(req, timeout=10) as r:
         return json.loads(r.read())
 
-def post_json(path, body):
+def post_json(path, body, cookie=None):
     data = json.dumps(body).encode()
-    req = urllib.request.Request(f"{BASE}{path}", data=data,
-                                  headers={"Content-Type": "application/json"}, method="POST")
+    h = {"Cookie": cookie} if cookie else _headers()
+    h["Content-Type"] = "application/json"
+    req = urllib.request.Request(f"{BASE}{path}", data=data, headers=h, method="POST")
     with urllib.request.urlopen(req, timeout=10) as r:
         return json.loads(r.read())
 
@@ -39,9 +49,49 @@ def post_multipart(path, field, filepath):
         f"Content-Type: audio/wav\r\n\r\n"
     ).encode() + wav + f"\r\n--{boundary}--\r\n".encode()
     req = urllib.request.Request(f"{BASE}{path}", data=body,
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}, method="POST")
+        headers=_headers({"Content-Type": f"multipart/form-data; boundary={boundary}"}), method="POST")
     with urllib.request.urlopen(req, timeout=60) as r:
         return json.loads(r.read())
+
+def status_of(fn):
+    try:
+        fn()
+        return 200
+    except urllib.error.HTTPError as e:
+        return e.code
+
+def login(username, password):
+    """Returns (status, cookie_header_value_or_empty)."""
+    data = json.dumps({"username": username, "password": password}).encode()
+    req = urllib.request.Request(f"{BASE}/api/login", data=data,
+        headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            set_cookie = r.headers.get("Set-Cookie", "")
+            return r.status, set_cookie.split(";")[0] if set_cookie else ""
+    except urllib.error.HTTPError as e:
+        return e.code, ""
+
+# ── 0. Auth ───────────────────────────────────────────────────────────────────
+print("\n=== 0. Auth ===")
+auth_enabled = status_of(lambda: get("/api/settings", cookie="none")) == 401
+if auth_enabled:
+    check("Unauthenticated /api/settings returns 401", True)
+    st, _ = login("admin", "wrong-password")
+    check("Bad password rejected (401)", st == 401, str(st))
+    st, clinician_cookie = login("sarah", "nuh-demo-poc")
+    check("Clinician login succeeds", st == 200 and clinician_cookie, str(st))
+    st, admin_cookie = login("admin", "nuh-admin-poc")
+    check("Admin login succeeds", st == 200 and admin_cookie, str(st))
+    check("Clinician can read settings",
+          status_of(lambda: get("/api/settings", cookie=clinician_cookie)) == 200)
+    check("Clinician cannot write settings (403)",
+          status_of(lambda: post_json("/api/settings", {}, cookie=clinician_cookie)) == 403)
+    check("Admin can write settings",
+          status_of(lambda: post_json("/api/settings", {}, cookie=admin_cookie)) == 200)
+    COOKIE = admin_cookie  # rest of the suite runs as admin
+else:
+    print("  [SKIP] auth_enabled=false — skipping auth checks")
 
 # ── 1. Settings ───────────────────────────────────────────────────────────────
 print("\n=== 1. Settings ===")
@@ -130,7 +180,8 @@ async def ws_test():
         return None
     wav_bytes = wav.read_bytes()
     try:
-        async with websockets.connect(f"ws://localhost:3007/ws/transcribe") as websocket:
+        async with websockets.connect("ws://localhost:3007/ws/transcribe",
+                                      additional_headers=_headers()) as websocket:
             await websocket.send(wav_bytes)
             resp = await asyncio.wait_for(websocket.recv(), timeout=60)
             return json.loads(resp)
@@ -158,8 +209,16 @@ async def ws_convo_test():
     except ImportError:
         print("  [SKIP] websockets package not installed — skipping")
         return None
+    # Unauthenticated WS upgrade must be refused when auth is on
+    if auth_enabled:
+        try:
+            async with websockets.connect("ws://localhost:3007/ws/transcribe"):
+                check("WS refuses connection without cookie", False, "connected!")
+        except Exception:
+            check("WS refuses connection without cookie", True)
     try:
-        async with websockets.connect("ws://localhost:3007/ws/transcribe") as w:
+        async with websockets.connect("ws://localhost:3007/ws/transcribe",
+                                      additional_headers=_headers()) as w:
             await w.send(json.dumps({"type": "config", "conversation": True,
                                      "patient_lang": "ms", "direction": "auto"}))
             ack = json.loads(await asyncio.wait_for(w.recv(), timeout=10))
@@ -194,7 +253,7 @@ else:
 # ── 3c. Glossary + continuous learning ───────────────────────────────────────
 print("\n=== 3c. Glossary & corrections ===")
 def delete_req(path):
-    req = urllib.request.Request(f"{BASE}{path}", method="DELETE")
+    req = urllib.request.Request(f"{BASE}{path}", method="DELETE", headers=_headers())
     with urllib.request.urlopen(req, timeout=10) as r:
         return r.status
 
@@ -268,6 +327,10 @@ try:
                  "correction-modal", "correction-save-btn"]:
         check(f"  element #{elem} present", elem in html)
     check("  tts.js referenced", 'src="tts.js"' in html)
+    req = urllib.request.Request(f"{BASE}/login.html")
+    with urllib.request.urlopen(req, timeout=10) as r:
+        login_html = r.read().decode()
+    check("  login page loads publicly", "login-form" in login_html)
 except Exception as e:
     check("Page loads", False, str(e))
 

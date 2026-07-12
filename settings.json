@@ -14,5 +14,6 @@
   "privacy_mode": true,
   "whisper_model": "large-v3-turbo",
   "whisper_device": "cuda",
-  "use_speaker_direction": false
+  "use_speaker_direction": false,
+  "auth_enabled": true
 }

@@ -85,6 +85,98 @@ struct AppState {
     speaker_id: Mutex<SpeakerIdWorker>,
     astr: Mutex<AstrWorker>,
     settings: Mutex<AppSettings>,
+    glossary: Mutex<Value>,    // physio term KB: data/glossary.json
+    corrections: Mutex<Value>, // clinician translation fixes: data/corrections.json
+}
+
+const GLOSSARY_PATH: &str = "data/glossary.json";
+const CORRECTIONS_PATH: &str = "data/corrections.json";
+const GLOSSARY_SEED_PATH: &str = "scripts/seeds/glossary.json";
+const MAX_GLOSSARY_TERMS_PER_PROMPT: usize = 15;
+const MAX_CORRECTIONS_PER_PROMPT: usize = 5;
+const MAX_STORED_CORRECTIONS: usize = 500;
+
+fn load_json_array(path: &str) -> Value {
+    if let Ok(content) = std::fs::read_to_string(path) {
+        if let Ok(v) = serde_json::from_str::<Value>(&content) {
+            if v.is_array() {
+                return v;
+            }
+        }
+    }
+    serde_json::json!([])
+}
+
+fn save_json_array(path: &str, v: &Value) {
+    if let Ok(json) = serde_json::to_string_pretty(v) {
+        if let Err(e) = std::fs::write(path, json) {
+            error!("Failed to persist {}: {}", path, e);
+        }
+    }
+}
+
+// Select glossary entries and past corrections relevant to this utterance,
+// for prompt-time injection into the LLM translation request.
+fn build_translation_context(
+    glossary: &Value,
+    corrections: &Value,
+    text: &str,
+    src_lang: &str,
+    tgt_lang: &str,
+) -> (Value, Value) {
+    let text_lower = text.to_lowercase();
+
+    let mut matched_terms: Vec<Value> = Vec::new();
+    if let Some(entries) = glossary.as_array() {
+        for entry in entries {
+            if matched_terms.len() >= MAX_GLOSSARY_TERMS_PER_PROMPT {
+                break;
+            }
+            // Source-side needle: English term when translating from English,
+            // otherwise that language's stored translation of the term
+            let needle = if src_lang == "en" {
+                entry["term_en"].as_str().unwrap_or("")
+            } else {
+                entry["translations"][src_lang].as_str().unwrap_or("")
+            };
+            if needle.is_empty() || !text_lower.contains(&needle.to_lowercase()) {
+                continue;
+            }
+            let target_side = if tgt_lang == "en" {
+                entry["term_en"].as_str().unwrap_or("")
+            } else {
+                entry["translations"][tgt_lang].as_str().unwrap_or("")
+            };
+            if target_side.is_empty() {
+                continue;
+            }
+            matched_terms.push(serde_json::json!({
+                "source": needle,
+                "target": target_side,
+            }));
+        }
+    }
+
+    let mut matched_corrections: Vec<Value> = Vec::new();
+    if let Some(entries) = corrections.as_array() {
+        for entry in entries.iter().rev() {
+            if matched_corrections.len() >= MAX_CORRECTIONS_PER_PROMPT {
+                break;
+            }
+            if entry["src_lang"].as_str() != Some(src_lang)
+                || entry["tgt_lang"].as_str() != Some(tgt_lang)
+            {
+                continue;
+            }
+            matched_corrections.push(serde_json::json!({
+                "source_text": entry["source_text"],
+                "corrected_translation": entry["corrected_translation"],
+                "note": entry["note"],
+            }));
+        }
+    }
+
+    (Value::Array(matched_terms), Value::Array(matched_corrections))
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -99,6 +191,7 @@ struct TranscribeResponse {
     session_id: String,
     transcript: String,
     translation: String,
+    simpler_english: String,
     detected_lang: String,
     target_lang: String,
     direction: String,
@@ -299,10 +392,23 @@ async fn main() {
     let settings_for_scan = settings_val.curated_audio_folder.clone();
     scan_and_enroll_curated(&mut worker, &settings_for_scan).await;
 
+    // Glossary: seed from the committed physio term list on first run
+    if !std::path::Path::new(GLOSSARY_PATH).exists()
+        && std::path::Path::new(GLOSSARY_SEED_PATH).exists()
+    {
+        if let Err(e) = std::fs::copy(GLOSSARY_SEED_PATH, GLOSSARY_PATH) {
+            error!("Failed to seed glossary: {}", e);
+        } else {
+            info!("Seeded {} from {}", GLOSSARY_PATH, GLOSSARY_SEED_PATH);
+        }
+    }
+
     let shared_state = Arc::new(AppState {
         speaker_id: Mutex::new(worker),
         astr: Mutex::new(astr_worker),
         settings: Mutex::new(settings_val),
+        glossary: Mutex::new(load_json_array(GLOSSARY_PATH)),
+        corrections: Mutex::new(load_json_array(CORRECTIONS_PATH)),
     });
 
     let cors = tower_http::cors::CorsLayer::new()
@@ -319,6 +425,9 @@ async fn main() {
         .route("/api/sessions", get(get_sessions_handler))
         .route("/api/sessions/:session_id/confirm", post(confirm_session_handler))
         .route("/api/settings", get(get_settings_handler).post(update_settings_handler))
+        .route("/api/glossary", get(get_glossary_handler).post(add_glossary_handler))
+        .route("/api/glossary/:entry_id", axum::routing::delete(delete_glossary_handler))
+        .route("/api/feedback", post(add_feedback_handler))
         .route("/api/translate", post(translate_handler))
         .route("/api/ollama/models", get(get_ollama_models_handler))
         .layer(DefaultBodyLimit::max(20 * 1024 * 1024))
@@ -512,7 +621,13 @@ async fn transcribe_handler(
             "whisper"  => target_lang == "en",
             _          => false,
         };
-    let translation = if should_translate {
+    let (translation, simpler_english) = if should_translate {
+        let (terms, corr) = {
+            let glossary = state.glossary.lock().await;
+            let corrections = state.corrections.lock().await;
+            build_translation_context(&glossary, &corrections,
+                &transcript_trimmed, &detected_lang, &target_lang)
+        };
         let req = serde_json::json!({
             "cmd": "translate",
             "text": transcript_trimmed,
@@ -523,18 +638,24 @@ async fn transcribe_handler(
             "audio_path": audio_path,
             "ollama_host": ollama_host,
             "ollama_model": ollama_model,
+            "glossary": terms,
+            "corrections": corr,
+            "want_simpler": direction == "to_patient",
         });
         let mut astr = state.astr.lock().await;
         match astr.send(&format!("{}\n", req)).await {
             Ok(resp) => match serde_json::from_str::<serde_json::Value>(&resp) {
-                Ok(v) if v["status"] == "ok" => v["translation"].as_str().unwrap_or("").to_string(),
-                Ok(v) => { warn!("Translate worker error: {}", v["message"]); String::new() }
-                Err(e) => { error!("Translate parse error: {}", e); String::new() }
+                Ok(v) if v["status"] == "ok" => (
+                    v["translation"].as_str().unwrap_or("").to_string(),
+                    v["simpler_english"].as_str().unwrap_or("").to_string(),
+                ),
+                Ok(v) => { warn!("Translate worker error: {}", v["message"]); (String::new(), String::new()) }
+                Err(e) => { error!("Translate parse error: {}", e); (String::new(), String::new()) }
             },
-            Err(e) => { error!("Translate send error: {}", e); String::new() }
+            Err(e) => { error!("Translate send error: {}", e); (String::new(), String::new()) }
         }
     } else {
-        String::new()
+        (String::new(), String::new())
     };
 
     // Persist session files (skipped entirely in privacy mode)
@@ -579,6 +700,7 @@ async fn transcribe_handler(
         transcript: transcript_trimmed,
         tts: tts_enabled && !translation.is_empty(),
         translation,
+        simpler_english,
         detected_lang,
         target_lang,
         direction: direction.to_string(),
@@ -695,6 +817,99 @@ async fn update_aliases_handler(
     Ok(StatusCode::OK)
 }
 
+async fn get_glossary_handler(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    Json(state.glossary.lock().await.clone())
+}
+
+async fn add_glossary_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let term_en = body["term_en"].as_str().unwrap_or("").trim().to_string();
+    if term_en.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "term_en is required".to_string()));
+    }
+    let translations = if body["translations"].is_object() {
+        body["translations"].clone()
+    } else {
+        serde_json::json!({})
+    };
+    let entry = serde_json::json!({
+        "id": Uuid::new_v4().to_string(),
+        "term_en": term_en,
+        "translations": translations,
+        "simpler_en": body["simpler_en"].as_str().unwrap_or(""),
+        "notes": body["notes"].as_str().unwrap_or(""),
+        "created_by": body["created_by"].as_str().unwrap_or("clinician"),
+        "updated_at": Local::now().to_rfc3339(),
+        "source": "manual",
+    });
+    let mut glossary = state.glossary.lock().await;
+    // Same English term updates the existing entry rather than duplicating
+    let term_lower = entry["term_en"].as_str().unwrap_or("").to_lowercase();
+    if let Some(arr) = glossary.as_array_mut() {
+        arr.retain(|e| e["term_en"].as_str().unwrap_or("").to_lowercase() != term_lower);
+        arr.push(entry.clone());
+    }
+    save_json_array(GLOSSARY_PATH, &glossary);
+    info!("Glossary entry added/updated: {}", entry["term_en"]);
+    Ok(Json(entry))
+}
+
+async fn delete_glossary_handler(
+    State(state): State<Arc<AppState>>,
+    Path(entry_id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let mut glossary = state.glossary.lock().await;
+    let before = glossary.as_array().map(|a| a.len()).unwrap_or(0);
+    if let Some(arr) = glossary.as_array_mut() {
+        arr.retain(|e| e["id"].as_str() != Some(entry_id.as_str()));
+    }
+    let after = glossary.as_array().map(|a| a.len()).unwrap_or(0);
+    if before == after {
+        return Err((StatusCode::NOT_FOUND, "Glossary entry not found".to_string()));
+    }
+    save_json_array(GLOSSARY_PATH, &glossary);
+    Ok(StatusCode::OK)
+}
+
+async fn add_feedback_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let src_lang = body["src_lang"].as_str().unwrap_or("").to_string();
+    let tgt_lang = body["tgt_lang"].as_str().unwrap_or("").to_string();
+    let source_text = body["source_text"].as_str().unwrap_or("").trim().to_string();
+    let corrected = body["corrected_translation"].as_str().unwrap_or("").trim().to_string();
+    if src_lang.is_empty() || tgt_lang.is_empty() || source_text.is_empty() || corrected.is_empty() {
+        return Err((StatusCode::BAD_REQUEST,
+            "src_lang, tgt_lang, source_text and corrected_translation are required".to_string()));
+    }
+    let entry = serde_json::json!({
+        "id": Uuid::new_v4().to_string(),
+        "src_lang": src_lang,
+        "tgt_lang": tgt_lang,
+        "source_text": source_text,
+        "wrong_translation": body["wrong_translation"].as_str().unwrap_or(""),
+        "corrected_translation": corrected,
+        "note": body["note"].as_str().unwrap_or(""),
+        "created_by": body["created_by"].as_str().unwrap_or("clinician"),
+        "created_at": Local::now().to_rfc3339(),
+    });
+    let mut corrections = state.corrections.lock().await;
+    if let Some(arr) = corrections.as_array_mut() {
+        arr.push(entry.clone());
+        while arr.len() > MAX_STORED_CORRECTIONS {
+            arr.remove(0);
+        }
+    }
+    save_json_array(CORRECTIONS_PATH, &corrections);
+    info!("Translation correction stored: {} -> {}", entry["src_lang"], entry["tgt_lang"]);
+    Ok(Json(entry))
+}
+
 async fn translate_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<Value>,
@@ -717,6 +932,11 @@ async fn translate_handler(
     if provider == "nemotron" && api_key.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "NVIDIA API key not configured in Settings".to_string()));
     }
+    let (terms, corr) = {
+        let glossary = state.glossary.lock().await;
+        let corrections = state.corrections.lock().await;
+        build_translation_context(&glossary, &corrections, &text, &source_lang, &target_lang)
+    };
     let req = serde_json::json!({
         "cmd": "translate",
         "text": text,
@@ -726,6 +946,8 @@ async fn translate_handler(
         "api_key": api_key,
         "ollama_host": ollama_host,
         "ollama_model": ollama_model,
+        "glossary": terms,
+        "corrections": corr,
     });
     let resp = {
         let mut astr = state.astr.lock().await;
@@ -1104,7 +1326,13 @@ async fn ws_transcribe_loop(mut socket: WebSocket, state: Arc<AppState>) {
                 "whisper"  => target_lang == "en",
                 _          => false,
             };
-        let translation = if ws_should_translate {
+        let (translation, simpler_english) = if ws_should_translate {
+            let (terms, corr) = {
+                let glossary = state.glossary.lock().await;
+                let corrections = state.corrections.lock().await;
+                build_translation_context(&glossary, &corrections,
+                    &transcript_trimmed, &detected_lang, &target_lang)
+            };
             let trans_req = serde_json::json!({
                 "cmd": "translate",
                 "text": transcript_trimmed,
@@ -1115,6 +1343,9 @@ async fn ws_transcribe_loop(mut socket: WebSocket, state: Arc<AppState>) {
                 "audio_path": audio_path,
                 "ollama_host": ollama_host,
                 "ollama_model": ollama_model,
+                "glossary": terms,
+                "corrections": corr,
+                "want_simpler": direction == "to_patient",
             }).to_string();
             let trans_resp = {
                 let mut astr = state.astr.lock().await;
@@ -1122,14 +1353,17 @@ async fn ws_transcribe_loop(mut socket: WebSocket, state: Arc<AppState>) {
             };
             match trans_resp {
                 Ok(resp) => match serde_json::from_str::<Value>(&resp) {
-                    Ok(v) if v["status"] == "ok" => v["translation"].as_str().unwrap_or("").to_string(),
-                    Ok(v) => { warn!("WS translate error: {}", v["message"]); String::new() }
-                    Err(e) => { error!("WS translate parse: {}", e); String::new() }
+                    Ok(v) if v["status"] == "ok" => (
+                        v["translation"].as_str().unwrap_or("").to_string(),
+                        v["simpler_english"].as_str().unwrap_or("").to_string(),
+                    ),
+                    Ok(v) => { warn!("WS translate error: {}", v["message"]); (String::new(), String::new()) }
+                    Err(e) => { error!("WS translate parse: {}", e); (String::new(), String::new()) }
                 },
-                Err(e) => { error!("WS translate send: {}", e); String::new() }
+                Err(e) => { error!("WS translate send: {}", e); (String::new(), String::new()) }
             }
         } else {
-            String::new()
+            (String::new(), String::new())
         };
 
         // Speaker ID — skipped in conversation mode (saves ~0.5-1s per utterance)
@@ -1161,6 +1395,7 @@ async fn ws_transcribe_loop(mut socket: WebSocket, state: Arc<AppState>) {
             "status": "ok",
             "transcript": transcript_trimmed,
             "translation": translation,
+            "simpler_english": simpler_english,
             "detected_lang": detected_lang,
             "target_lang": target_lang,
             "direction": direction,

@@ -222,19 +222,180 @@ function renderConversationBubble(data) {
             <span>${who}</span>
             <span>${escapeHtml(srcLabel)} → ${escapeHtml(tgtLabel)}</span>
             ${hasTranslation ? '<button type="button" class="convo-replay" title="Replay audio">🔊</button>' : ''}
+            ${hasTranslation ? '<button type="button" class="convo-flag" title="Refine this translation">✎</button>' : ''}
         </div>
         <div class="convo-bubble-original">${escapeHtml(data.transcript || '(no speech detected)')}</div>
         ${hasTranslation ? `<div class="convo-bubble-translation">${escapeHtml(data.translation)}</div>` : ''}
+        ${data.simpler_english ? `<div class="simpler-chip">💡 Simpler: ${escapeHtml(data.simpler_english)}</div>` : ''}
     `;
     if (hasTranslation) {
         bubble.querySelector('.convo-replay').addEventListener('click', () => {
             if (window.TTS) TTS.speak(data.translation, data.target_lang);
+        });
+        bubble.querySelector('.convo-flag').addEventListener('click', () => {
+            openCorrectionModal(data);
         });
     }
     log.appendChild(bubble);
     while (log.children.length > 100) log.removeChild(log.firstChild);
     log.scrollTop = log.scrollHeight;
 }
+
+// ─── Correction Feedback (continuous learning) ──────────────────────────────
+
+let correctionContext = null;
+
+function openCorrectionModal(data) {
+    correctionContext = data;
+    document.getElementById('correction-source').textContent = data.transcript || '';
+    document.getElementById('correction-current').textContent = data.translation || '';
+    document.getElementById('correction-text').value = data.translation || '';
+    document.getElementById('correction-note').value = '';
+    document.getElementById('correction-modal').style.display = 'flex';
+}
+
+function closeCorrectionModal() {
+    document.getElementById('correction-modal').style.display = 'none';
+    correctionContext = null;
+}
+
+async function saveCorrection() {
+    if (!correctionContext) return;
+    const corrected = document.getElementById('correction-text').value.trim();
+    if (!corrected) { alert('Corrected translation is required.'); return; }
+    try {
+        const res = await fetch('/api/feedback', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                src_lang: correctionContext.detected_lang,
+                tgt_lang: correctionContext.target_lang,
+                source_text: correctionContext.transcript,
+                wrong_translation: correctionContext.translation,
+                corrected_translation: corrected,
+                note: document.getElementById('correction-note').value.trim(),
+            }),
+        });
+        if (res.ok) {
+            closeCorrectionModal();
+        } else {
+            alert('Failed to save correction: ' + await res.text());
+        }
+    } catch (err) {
+        alert('Network error saving correction.');
+    }
+}
+
+// ─── Glossary Management ─────────────────────────────────────────────────────
+
+async function fetchGlossary() {
+    const tbody = document.getElementById('glossary-table-body');
+    if (!tbody) return;
+    try {
+        const res = await fetch('/api/glossary');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        renderGlossaryTable(await res.json());
+    } catch (err) {
+        tbody.innerHTML = `<tr><td colspan="5" style="text-align:center; color:var(--text-muted);">Could not load glossary.</td></tr>`;
+    }
+}
+
+function renderGlossaryTable(entries) {
+    const tbody = document.getElementById('glossary-table-body');
+    tbody.innerHTML = '';
+    if (!entries || entries.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="5" style="text-align:center; color:var(--text-muted);">No glossary terms yet — add the first one above.</td></tr>`;
+        return;
+    }
+    entries.sort((a, b) => (a.term_en || '').localeCompare(b.term_en || ''));
+    entries.forEach(e => {
+        const translations = Object.entries(e.translations || {})
+            .filter(([, v]) => v)
+            .map(([k, v]) => `<span style="margin-right:0.6rem;"><span style="color:var(--primary-color); font-family:var(--font-mono); font-size:0.75rem;">${escapeHtml(k)}</span> ${escapeHtml(v)}</span>`)
+            .join('');
+        const row = document.createElement('tr');
+        row.innerHTML = `
+            <td style="font-weight:600;">${escapeHtml(e.term_en)}</td>
+            <td>${translations || '<em style="color:var(--text-muted);">—</em>'}</td>
+            <td style="color:var(--text-muted);">${escapeHtml(e.simpler_en || '')}</td>
+            <td style="font-family:var(--font-mono); font-size:0.78rem; color:var(--text-muted);">${escapeHtml(e.source || 'manual')}</td>
+            <td class="table-actions">
+                <button type="button" class="action-btn" title="Delete term">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                </button>
+            </td>
+        `;
+        row.querySelector('.action-btn').addEventListener('click', async () => {
+            if (!confirm(`Delete glossary term "${e.term_en}"?`)) return;
+            const res = await fetch(`/api/glossary/${encodeURIComponent(e.id)}`, { method: 'DELETE' });
+            if (res.ok) fetchGlossary();
+        });
+        tbody.appendChild(row);
+    });
+}
+
+async function addGlossaryTerm() {
+    const termEn = document.getElementById('glossary-term-en').value.trim();
+    const lang = document.getElementById('glossary-lang').value;
+    const translation = document.getElementById('glossary-translation').value.trim();
+    const simpler = document.getElementById('glossary-simpler').value.trim();
+    const status = document.getElementById('glossary-status');
+    if (!termEn || !translation) {
+        status.textContent = 'English term and translation are required.';
+        setTimeout(() => { status.textContent = ''; }, 3000);
+        return;
+    }
+    // Merge with any existing entry so adding a second language keeps the first
+    let translations = {};
+    let existingSimpler = '';
+    try {
+        const res = await fetch('/api/glossary');
+        if (res.ok) {
+            const existing = (await res.json()).find(
+                g => (g.term_en || '').toLowerCase() === termEn.toLowerCase());
+            if (existing) {
+                translations = existing.translations || {};
+                existingSimpler = existing.simpler_en || '';
+            }
+        }
+    } catch (err) { /* proceed with fresh entry */ }
+    translations[lang] = translation;
+    try {
+        const res = await fetch('/api/glossary', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                term_en: termEn,
+                translations,
+                simpler_en: simpler || existingSimpler,
+            }),
+        });
+        if (res.ok) {
+            status.textContent = `Saved "${termEn}".`;
+            document.getElementById('glossary-term-en').value = '';
+            document.getElementById('glossary-translation').value = '';
+            document.getElementById('glossary-simpler').value = '';
+            fetchGlossary();
+        } else {
+            status.textContent = 'Failed: ' + await res.text();
+        }
+    } catch (err) {
+        status.textContent = 'Network error.';
+    }
+    setTimeout(() => { status.textContent = ''; }, 3000);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    fetchGlossary();
+    const addBtn = document.getElementById('glossary-add-btn');
+    if (addBtn) addBtn.addEventListener('click', addGlossaryTerm);
+    const cClose = document.getElementById('correction-close-btn');
+    const cCancel = document.getElementById('correction-cancel-btn');
+    const cSave = document.getElementById('correction-save-btn');
+    if (cClose) cClose.addEventListener('click', closeCorrectionModal);
+    if (cCancel) cCancel.addEventListener('click', closeCorrectionModal);
+    if (cSave) cSave.addEventListener('click', saveCorrection);
+});
 
 document.addEventListener('DOMContentLoaded', () => {
     if (window.TTS) TTS.init();

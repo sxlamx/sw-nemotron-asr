@@ -117,13 +117,61 @@ _LANG_NAMES = {
     "nan": "Hokkien (Min Nan)",
 }
 
-def _llm_translate(client, model: str, text: str, source_lang: str, target_lang: str) -> dict:
+def _build_translate_prompt(text, source_lang, target_lang,
+                            glossary=None, corrections=None, want_simpler=False):
     src_name = _LANG_NAMES.get(source_lang, source_lang)
     tgt_name = _LANG_NAMES.get(target_lang, target_lang)
-    prompt = (
+    parts = [
+        f"You are translating during a physiotherapy consultation. "
         f"Translate the following {src_name} text to {tgt_name}. "
-        f"Output only the translation, no explanations.\n\nText: {text}"
-    )
+        f"Keep clinical meaning exact; small wording changes can affect patient safety."
+    ]
+    if glossary:
+        lines = "\n".join(f'- "{g["source"]}" must be translated as "{g["target"]}"'
+                          for g in glossary)
+        parts.append("Approved translations for domain terms (use these exactly):\n" + lines)
+    if corrections:
+        lines = "\n".join(
+            f'- Previously "{c["source_text"]}" was corrected by a clinician to '
+            f'"{c["corrected_translation"]}"' + (f' ({c["note"]})' if c.get("note") else "")
+            for c in corrections)
+        parts.append("Clinician-approved corrections from past sessions (apply them):\n" + lines)
+    if want_simpler:
+        parts.append(
+            'Respond with ONLY a JSON object, no other text:\n'
+            '{"translation": "<the translation>", "simpler_english": <null, or a plain-English '
+            'rephrasing of the original if it contains technical medical terminology a '
+            'layperson may not understand>}'
+        )
+    else:
+        parts.append("Output only the translation, no explanations.")
+    parts.append(f"Text: {text}")
+    return "\n\n".join(parts)
+
+def _parse_llm_translation(content: str, want_simpler: bool) -> dict:
+    content = content.strip()
+    if want_simpler:
+        raw = content
+        if raw.startswith("```"):
+            raw = raw.strip("`")
+            if raw.startswith("json"):
+                raw = raw[4:]
+        try:
+            obj = json.loads(raw.strip())
+            translation = str(obj.get("translation") or "").strip()
+            simpler = obj.get("simpler_english")
+            simpler = str(simpler).strip() if simpler else ""
+            if translation:
+                return {"status": "ok", "translation": translation,
+                        "simpler_english": simpler}
+        except (json.JSONDecodeError, AttributeError):
+            pass  # model ignored the JSON instruction — fall through
+    return {"status": "ok", "translation": content, "simpler_english": ""}
+
+def _llm_translate(client, model: str, text: str, source_lang: str, target_lang: str,
+                   glossary=None, corrections=None, want_simpler=False) -> dict:
+    prompt = _build_translate_prompt(text, source_lang, target_lang,
+                                     glossary, corrections, want_simpler)
     # Hard timeout so an unreachable/cold LLM host fails fast instead of
     # blocking the worker (and every queued utterance behind its mutex)
     resp = client.chat.completions.create(
@@ -133,13 +181,16 @@ def _llm_translate(client, model: str, text: str, source_lang: str, target_lang:
         max_tokens=512,
         timeout=45,
     )
-    return {"status": "ok", "translation": resp.choices[0].message.content.strip()}
+    return _parse_llm_translation(resp.choices[0].message.content, want_simpler)
 
 def cmd_translate(payload: dict) -> dict:
     text = payload.get("text", "")
     source_lang = payload.get("source_lang", "auto")
     target_lang = payload.get("target_lang", "en")
     provider = payload.get("provider", "nemotron")
+    glossary = payload.get("glossary") or []
+    corrections = payload.get("corrections") or []
+    want_simpler = bool(payload.get("want_simpler"))
 
     if not text.strip():
         return {"status": "ok", "translation": ""}
@@ -166,7 +217,8 @@ def cmd_translate(payload: dict) -> dict:
                 api_key="ollama",
                 http_client=httpx.Client(verify=False),
             )
-            return _llm_translate(client, ollama_model, text, source_lang, target_lang)
+            return _llm_translate(client, ollama_model, text, source_lang, target_lang,
+                                  glossary, corrections, want_simpler)
 
         else:  # nemotron
             from openai import OpenAI
@@ -179,7 +231,8 @@ def cmd_translate(payload: dict) -> dict:
                 http_client=httpx.Client(verify=False),
             )
             return _llm_translate(client, "nvidia/llama-3.1-nemotron-70b-instruct",
-                                   text, source_lang, target_lang)
+                                   text, source_lang, target_lang,
+                                   glossary, corrections, want_simpler)
 
     except Exception as e:
         return {"status": "error", "message": str(e)}

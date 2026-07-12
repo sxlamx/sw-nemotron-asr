@@ -191,6 +191,54 @@ else:
           f"target: {resp.get('target_lang')}")
     print(f"  translation: {repr((resp.get('translation') or '')[:80])}")
 
+# ── 3c. Glossary + continuous learning ───────────────────────────────────────
+print("\n=== 3c. Glossary & corrections ===")
+def delete_req(path):
+    req = urllib.request.Request(f"{BASE}{path}", method="DELETE")
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return r.status
+
+try:
+    gl = get("/api/glossary")
+    check("GET /api/glossary returns a list", isinstance(gl, list), f"{len(gl)} entries")
+    check("Seed glossary loaded", any(e.get("term_en") == "weight-bearing" for e in gl),
+          f"{len(gl)} entries")
+
+    entry = post_json("/api/glossary", {
+        "term_en": "e2e-test-term", "translations": {"ms": "ujian-e2e"},
+        "simpler_en": "a test"})
+    check("POST /api/glossary creates entry", bool(entry.get("id")), entry.get("id"))
+    gl2 = get("/api/glossary")
+    check("New term appears in glossary",
+          any(e.get("term_en") == "e2e-test-term" for e in gl2))
+
+    # Duplicate term_en replaces, not duplicates
+    post_json("/api/glossary", {"term_en": "E2E-Test-Term", "translations": {"ms": "ujian-e2e-v2"}})
+    gl3 = get("/api/glossary")
+    dups = [e for e in gl3 if (e.get("term_en") or "").lower() == "e2e-test-term"]
+    check("Same term updates instead of duplicating", len(dups) == 1, f"{len(dups)} entries")
+
+    status = delete_req(f"/api/glossary/{dups[0]['id']}")
+    check("DELETE /api/glossary/:id works", status == 200, str(status))
+
+    fb = post_json("/api/feedback", {
+        "src_lang": "en", "tgt_lang": "ms",
+        "source_text": "Please bend your knee slowly and hold for 5 seconds.",
+        "wrong_translation": "x",
+        "corrected_translation": "Sila bengkokkan lutut anda perlahan-lahan dan tahan selama lima saat.",
+        "note": "polite clinical phrasing"})
+    check("POST /api/feedback stores correction", bool(fb.get("id")))
+
+    # The stored correction should be applied to a repeat translation
+    tr = post_json("/api/translate", {
+        "text": "Please bend your knee slowly and hold for 5 seconds.",
+        "source_lang": "en", "target_lang": "ms"})
+    applied = "lutut" in (tr.get("translation") or "").lower()
+    check("Correction context reaches translator (mentions 'lutut')",
+          applied, repr(tr.get("translation", ""))[:90])
+except Exception as e:
+    check("Glossary/corrections API succeeded", False, str(e))
+
 # ── 4. Sessions API ───────────────────────────────────────────────────────────
 print("\n=== 4. GET /api/sessions ===")
 try:
@@ -215,7 +263,9 @@ try:
     for elem in ["settings-nemotron-api-key", "live-transcript-panel",
                  "source-lang", "target-lang", "settings-source-lang", "settings-target-lang",
                  "convo-mode-toggle", "patient-lang", "direction-pills", "convo-log",
-                 "tts-toggle", "clear-convo-btn"]:
+                 "tts-toggle", "clear-convo-btn",
+                 "glossary-card", "glossary-add-btn", "glossary-table-body",
+                 "correction-modal", "correction-save-btn"]:
         check(f"  element #{elem} present", elem in html)
     check("  tts.js referenced", 'src="tts.js"' in html)
 except Exception as e:

@@ -1087,6 +1087,38 @@
             .convo-bubble { max-width: 95%; }
             .convo-row { gap: 0.75rem; }
         }
+
+        /* ── Glossary & Corrections ────────────────────────────────────── */
+        .simpler-chip {
+            display: inline-block;
+            margin-top: 0.45rem;
+            padding: 0.3rem 0.65rem;
+            border-radius: 8px;
+            background: rgba(0, 230, 118, 0.08);
+            border: 1px solid rgba(0, 230, 118, 0.3);
+            color: var(--success-color);
+            font-size: 0.8rem;
+        }
+        .convo-flag {
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            font-size: 0.85rem;
+            padding: 0.1rem 0.3rem;
+            opacity: 0.7;
+        }
+        .convo-flag:hover { opacity: 1; }
+        .glossary-form-grid {
+            display: grid;
+            grid-template-columns: 1.2fr 0.8fr 1.2fr 1.2fr auto;
+            gap: 0.75rem;
+            align-items: end;
+            margin-bottom: 1rem;
+        }
+        @media (max-width: 900px) {
+            .glossary-form-grid { grid-template-columns: 1fr 1fr; }
+        }
+        .glossary-table-container { max-height: 340px; overflow-y: auto; }
     </style>
 </head>
 <body>
@@ -1362,6 +1394,61 @@
             </div>
         </div>
 
+        <!-- Physiotherapy Glossary / Knowledge Base Card -->
+        <div class="card" style="margin-bottom: 2rem;" id="glossary-card">
+            <h2>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
+                Physiotherapy Glossary
+            </h2>
+            <p style="font-size:0.82rem; color:var(--text-muted); margin:0.5rem 0 1rem;">
+                Approved translations are injected into every matching translation.
+                Corrections made from the conversation log are applied to future sessions automatically.
+            </p>
+            <div class="glossary-form-grid">
+                <div class="form-group" style="margin-bottom:0;">
+                    <label for="glossary-term-en">English Term</label>
+                    <input type="text" id="glossary-term-en" class="form-control" placeholder="e.g. weight-bearing">
+                </div>
+                <div class="form-group" style="margin-bottom:0;">
+                    <label for="glossary-lang">Language</label>
+                    <select id="glossary-lang" class="form-control">
+                        <option value="ms">Bahasa Melayu</option>
+                        <option value="id">Bahasa Indonesia</option>
+                        <option value="ta">Tamil</option>
+                        <option value="yue">Cantonese</option>
+                        <option value="my">Burmese</option>
+                        <option value="zh">Mandarin</option>
+                    </select>
+                </div>
+                <div class="form-group" style="margin-bottom:0;">
+                    <label for="glossary-translation">Approved Translation</label>
+                    <input type="text" id="glossary-translation" class="form-control" placeholder="translation in selected language">
+                </div>
+                <div class="form-group" style="margin-bottom:0;">
+                    <label for="glossary-simpler">Simpler English (optional)</label>
+                    <input type="text" id="glossary-simpler" class="form-control" placeholder="plain-language alternative">
+                </div>
+                <button type="button" class="btn btn-primary" id="glossary-add-btn" style="white-space:nowrap;">Add Term</button>
+            </div>
+            <div id="glossary-status" style="font-size:0.82rem; color:var(--text-muted); font-family:var(--font-mono); min-height:1.2em; margin-bottom:0.5rem;"></div>
+            <div class="glossary-table-container recordings-table-container">
+                <table class="recordings-table">
+                    <thead>
+                        <tr>
+                            <th>English Term</th>
+                            <th>Translations</th>
+                            <th>Simpler English</th>
+                            <th>Source</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="glossary-table-body">
+                        <tr><td colspan="5" style="text-align:center; color:var(--text-muted);">Loading…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
         <!-- Settings Card -->
         <div class="card">
             <h2>
@@ -1429,6 +1516,36 @@
                 <button class="btn btn-primary" id="save-settings-btn" style="white-space:nowrap;">Save Settings</button>
             </div>
             <div id="settings-status" style="margin-top:0.75rem; font-size:0.82rem; color:var(--text-muted); font-family:var(--font-mono); min-height:1.2em;"></div>
+        </div>
+    </div>
+
+    <!-- Correction Feedback Modal -->
+    <div class="modal" id="correction-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 style="font-weight: 600;">Refine Translation</h3>
+                <button type="button" class="modal-close" id="correction-close-btn">&times;</button>
+            </div>
+            <div class="form-group">
+                <label>Original</label>
+                <div id="correction-source" style="font-size:0.9rem; color:var(--text-muted); padding:0.4rem 0;"></div>
+            </div>
+            <div class="form-group">
+                <label>Current Translation</label>
+                <div id="correction-current" style="font-size:0.9rem; color:var(--text-muted); padding:0.4rem 0;"></div>
+            </div>
+            <div class="form-group">
+                <label for="correction-text">Corrected Translation</label>
+                <input type="text" id="correction-text" class="form-control" placeholder="how it should be translated">
+            </div>
+            <div class="form-group">
+                <label for="correction-note">Note (optional, e.g. why)</label>
+                <input type="text" id="correction-note" class="form-control" placeholder="e.g. clinical term, politeness level">
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-secondary" id="correction-cancel-btn">Cancel</button>
+                <button type="button" class="btn btn-primary" id="correction-save-btn">Save Correction</button>
+            </div>
         </div>
     </div>
 

@@ -153,6 +153,156 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 });
 
+// ─── Conversation Mode ───────────────────────────────────────────────────────
+
+const LANG_LABELS = {
+    en: 'English', zh: 'Mandarin', ms: 'Melayu', ta: 'Tamil', ko: 'Korean',
+    id: 'Indonesia', yue: 'Cantonese', my: 'Burmese',
+};
+
+let conversationMode = true;
+let patientLang = 'ms';
+let convoDirection = 'auto'; // 'auto' | 'to_patient' | 'to_clinician'
+let ttsEnabled = true;
+let privacyMode = true;
+
+function sendWSConfig() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({
+        type: 'config',
+        conversation: conversationMode,
+        patient_lang: patientLang,
+        direction: convoDirection,
+    }));
+}
+
+function updateDirectionPillLabels() {
+    const code = (patientLang || 'ms').toUpperCase();
+    document.querySelectorAll('.dir-patient-code').forEach(el => { el.textContent = code; });
+}
+
+function applyConversationModeUI() {
+    const convoRow = document.getElementById('convo-lang-row');
+    const classicSelectors = document.getElementById('classic-lang-selectors');
+    if (convoRow) convoRow.style.display = conversationMode ? 'flex' : 'none';
+    if (classicSelectors) classicSelectors.style.display = conversationMode ? 'none' : 'flex';
+}
+
+function updateTTSVoiceNote() {
+    const note = document.getElementById('tts-voice-note');
+    if (!note) return;
+    if (!ttsEnabled || !window.TTS) { note.classList.add('hidden'); return; }
+    // Voice list can load asynchronously — check again shortly after changes
+    setTimeout(() => {
+        if (!TTS.hasVoiceFor(patientLang)) {
+            note.textContent = `⚠ No ${LANG_LABELS[patientLang] || patientLang} voice installed on this device — translations will show as text only.`;
+            note.classList.remove('hidden');
+        } else {
+            note.classList.add('hidden');
+        }
+    }, 500);
+}
+
+function renderConversationBubble(data) {
+    const wrap = document.getElementById('convo-log-wrap');
+    const log = document.getElementById('convo-log');
+    if (!wrap || !log) return;
+    wrap.classList.remove('hidden');
+
+    const dir = data.direction === 'to_patient' ? 'to-patient' : 'to-clinician';
+    const who = data.direction === 'to_patient' ? '🩺 Clinician' : '🧑 Patient';
+    const srcLabel = LANG_LABELS[data.detected_lang] || data.detected_lang;
+    const tgtLabel = LANG_LABELS[data.target_lang] || data.target_lang;
+
+    const bubble = document.createElement('div');
+    bubble.className = `convo-bubble ${dir}`;
+    const hasTranslation = !!data.translation;
+    bubble.innerHTML = `
+        <div class="convo-bubble-meta">
+            <span>${who}</span>
+            <span>${escapeHtml(srcLabel)} → ${escapeHtml(tgtLabel)}</span>
+            ${hasTranslation ? '<button type="button" class="convo-replay" title="Replay audio">🔊</button>' : ''}
+        </div>
+        <div class="convo-bubble-original">${escapeHtml(data.transcript || '(no speech detected)')}</div>
+        ${hasTranslation ? `<div class="convo-bubble-translation">${escapeHtml(data.translation)}</div>` : ''}
+    `;
+    if (hasTranslation) {
+        bubble.querySelector('.convo-replay').addEventListener('click', () => {
+            if (window.TTS) TTS.speak(data.translation, data.target_lang);
+        });
+    }
+    log.appendChild(bubble);
+    while (log.children.length > 100) log.removeChild(log.firstChild);
+    log.scrollTop = log.scrollHeight;
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    if (window.TTS) TTS.init();
+
+    const convoToggle = document.getElementById('convo-mode-toggle');
+    if (convoToggle) {
+        convoToggle.addEventListener('change', () => {
+            conversationMode = convoToggle.checked;
+            applyConversationModeUI();
+            sendWSConfig();
+            fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ conversation_mode: conversationMode }),
+            }).catch(() => {});
+        });
+    }
+
+    const ttsToggle = document.getElementById('tts-toggle');
+    if (ttsToggle) {
+        ttsToggle.addEventListener('change', () => {
+            ttsEnabled = ttsToggle.checked;
+            if (window.TTS) { TTS.enabled = ttsEnabled; if (!ttsEnabled) TTS.stop(); }
+            updateTTSVoiceNote();
+            fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ tts_enabled: ttsEnabled }),
+            }).catch(() => {});
+        });
+    }
+
+    const patientSel = document.getElementById('patient-lang');
+    if (patientSel) {
+        patientSel.addEventListener('change', () => {
+            patientLang = patientSel.value;
+            updateDirectionPillLabels();
+            updateTTSVoiceNote();
+            sendWSConfig();
+            fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ patient_language: patientLang }),
+            }).catch(() => {});
+        });
+    }
+
+    document.querySelectorAll('.dir-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            convoDirection = btn.dataset.dir;
+            document.querySelectorAll('.dir-btn').forEach(b =>
+                b.classList.toggle('active', b === btn));
+            sendWSConfig();
+        });
+    });
+
+    const clearConvoBtn = document.getElementById('clear-convo-btn');
+    if (clearConvoBtn) {
+        clearConvoBtn.addEventListener('click', () => {
+            document.getElementById('convo-log').innerHTML = '';
+            document.getElementById('convo-log-wrap').classList.add('hidden');
+        });
+    }
+
+    updateDirectionPillLabels();
+    applyConversationModeUI();
+});
+
 // ─── WebSocket Management ────────────────────────────────────────────────────
 
 let wsPendingResponse = false;
@@ -172,14 +322,20 @@ function connectWebSocket() {
 
         ws.onopen = () => {
             console.log('[WS] Connected to', wsUrl);
+            sendWSConfig();
         };
 
         ws.onmessage = (event) => {
-            wsPendingResponse = false;
             try {
                 const data = JSON.parse(event.data);
+                if (data.type === 'config_ack') {
+                    console.log('[WS] Config acknowledged:', data);
+                    return;
+                }
+                wsPendingResponse = false;
                 displayLiveResult(data);
             } catch (err) {
+                wsPendingResponse = false;
                 console.error('[WS] Failed to parse message:', err, event.data);
             }
         };
@@ -249,6 +405,24 @@ function displayLiveResult(data) {
         recordTrigger.disabled = false;
         recStatus.innerText = 'Idle';
         recStatus.className = 'status-badge idle';
+    }
+
+    // Conversation mode: chat bubble + spoken translation, no classic panels
+    if (data.direction === 'to_patient' || data.direction === 'to_clinician') {
+        if (data.transcript) {
+            renderConversationBubble(data);
+            addToHistory(data);
+            if (data.tts && ttsEnabled && window.TTS && data.translation) {
+                TTS.speak(data.translation, data.target_lang);
+            }
+        }
+        lastCapture = {
+            text: data.transcript || '',
+            detected_lang: data.detected_lang || 'auto',
+            translation: data.translation || '',
+        };
+        if (!privacyMode) fetchSessions();
+        return;
     }
 
     const panel = document.getElementById('live-transcript-panel');
@@ -614,6 +788,9 @@ async function startAudioRecording() {
 
         scriptNode.onaudioprocess = (e) => {
             if (!isRecording) return;
+            // Gate the mic while TTS is playing (+tail) so the device speaker
+            // doesn't re-trigger transcription of its own translated speech
+            if (window.TTS && TTS.isPlaying()) return;
             const samples = Array.from(e.inputBuffer.getChannelData(0));
 
             // Energy VAD
@@ -691,6 +868,8 @@ async function stopAudioRecording() {
 // ─── Recording Trigger ────────────────────────────────────────────────────────
 
 recordTrigger.addEventListener('click', async () => {
+    // Unlock speech synthesis inside the user gesture (iOS/Android autoplay)
+    if (window.TTS) TTS.unlock();
     if (!isRecording) {
         recordTrigger.classList.add('recording');
         micIcon.style.display = 'none';
@@ -1004,6 +1183,32 @@ async function fetchSettings() {
                 const targetLang = document.getElementById('target-lang');
                 if (targetLang) targetLang.value = s.target_language;
             }
+            // Conversation mode / TTS / privacy
+            if (typeof s.conversation_mode === 'boolean') {
+                conversationMode = s.conversation_mode;
+                const ct = document.getElementById('convo-mode-toggle');
+                if (ct) ct.checked = conversationMode;
+            }
+            if (s.patient_language) {
+                patientLang = s.patient_language;
+                const ps = document.getElementById('patient-lang');
+                if (ps) ps.value = patientLang;
+            }
+            if (typeof s.tts_enabled === 'boolean') {
+                ttsEnabled = s.tts_enabled;
+                const tt = document.getElementById('tts-toggle');
+                if (tt) tt.checked = ttsEnabled;
+                if (window.TTS) TTS.enabled = ttsEnabled;
+            }
+            if (typeof s.privacy_mode === 'boolean') {
+                privacyMode = s.privacy_mode;
+                // Nothing is persisted in privacy mode — hide the Recordings card
+                const recCard = recordingsTableBody && recordingsTableBody.closest('.card');
+                if (recCard) recCard.style.display = privacyMode ? 'none' : '';
+            }
+            updateDirectionPillLabels();
+            applyConversationModeUI();
+            updateTTSVoiceNote();
             // Provider toggle
             if (s.translation_provider) setProvider(s.translation_provider);
             // Ollama settings

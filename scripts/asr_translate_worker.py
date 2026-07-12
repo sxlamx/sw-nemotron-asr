@@ -38,6 +38,20 @@ try:
 except Exception:
     pass  # Best-effort; may still succeed if proxy doesn't intercept
 
+# CUDA on Windows: CTranslate2 needs cublas/cudnn DLLs on the loader path.
+# The pip wheels (nvidia-cublas-cu12, nvidia-cudnn-cu12) ship them inside
+# site-packages/nvidia/*/bin — register those dirs before loading the model.
+if os.environ.get("WHISPER_DEVICE", "cpu") != "cpu":
+    import glob as _glob
+    import site as _site
+    for _sp in set(_site.getsitepackages() + [_site.getusersitepackages()]):
+        for _bin in _glob.glob(os.path.join(_sp, "nvidia", "*", "bin")):
+            try:
+                os.add_dll_directory(_bin)
+                os.environ["PATH"] = _bin + os.pathsep + os.environ.get("PATH", "")
+            except OSError:
+                pass
+
 from faster_whisper import WhisperModel
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -48,27 +62,50 @@ _whisper_model = None
 def get_whisper_model():
     global _whisper_model
     if _whisper_model is None:
+        model_name = os.environ.get("WHISPER_MODEL", "small")
+        device = os.environ.get("WHISPER_DEVICE", "cpu")
+        compute_type = "int8" if device == "cpu" else "float16"
         _whisper_model = WhisperModel(
-            "small",
-            device="cpu",
-            compute_type="int8",
+            model_name,
+            device=device,
+            compute_type=compute_type,
             download_root=WHISPER_MODEL_DIR,
         )
     return _whisper_model
 
-def cmd_transcribe(audio_path: str, source_lang: str) -> dict:
+def _run_transcribe(model, audio_path: str, lang_arg):
+    segments, info = model.transcribe(
+        audio_path,
+        language=lang_arg,
+        beam_size=5,
+        vad_filter=True,
+        vad_parameters={"threshold": 0.3},
+    )
+    text = " ".join(seg.text.strip() for seg in segments).strip()
+    return text, info
+
+def cmd_transcribe(audio_path: str, source_lang: str, allowed_langs=None) -> dict:
     model = get_whisper_model()
     lang_arg = None if source_lang == "auto" else source_lang
     try:
-        segments, info = model.transcribe(
-            audio_path,
-            language=lang_arg,
-            beam_size=5,
-            vad_filter=True,
-            vad_parameters={"threshold": 0.3},
-        )
-        text = " ".join(seg.text.strip() for seg in segments).strip()
+        text, info = _run_transcribe(model, audio_path, lang_arg)
         detected = info.language if source_lang == "auto" else source_lang
+
+        # Conversation mode: constrain detection to the clinician/patient pair.
+        # If open detection picked a language outside the pair (e.g. "id" for a
+        # Malay speaker), re-transcribe with the most probable allowed language.
+        if lang_arg is None and allowed_langs and detected not in allowed_langs:
+            best = None
+            probs = getattr(info, "all_language_probs", None)
+            if probs:
+                allowed_probs = [(l, p) for l, p in probs if l in allowed_langs]
+                if allowed_probs:
+                    best = max(allowed_probs, key=lambda lp: lp[1])[0]
+            if best is None:
+                best = allowed_langs[0]
+            text, _ = _run_transcribe(model, audio_path, best)
+            detected = best
+
         return {"status": "ok", "text": text, "detected_lang": detected}
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -76,6 +113,8 @@ def cmd_transcribe(audio_path: str, source_lang: str) -> dict:
 _LANG_NAMES = {
     "zh": "Simplified Chinese", "en": "English",
     "ms": "Malay", "ta": "Tamil", "ko": "Korean",
+    "id": "Indonesian", "yue": "Cantonese", "my": "Burmese",
+    "nan": "Hokkien (Min Nan)",
 }
 
 def _llm_translate(client, model: str, text: str, source_lang: str, target_lang: str) -> dict:
@@ -85,11 +124,14 @@ def _llm_translate(client, model: str, text: str, source_lang: str, target_lang:
         f"Translate the following {src_name} text to {tgt_name}. "
         f"Output only the translation, no explanations.\n\nText: {text}"
     )
+    # Hard timeout so an unreachable/cold LLM host fails fast instead of
+    # blocking the worker (and every queued utterance behind its mutex)
     resp = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.1,
         max_tokens=512,
+        timeout=45,
     )
     return {"status": "ok", "translation": resp.choices[0].message.content.strip()}
 
@@ -153,7 +195,11 @@ def run_persistent():
             req = json.loads(line)
             cmd = req.get("cmd")
             if cmd == "transcribe":
-                result = cmd_transcribe(req["audio_path"], req.get("source_lang", "auto"))
+                result = cmd_transcribe(
+                    req["audio_path"],
+                    req.get("source_lang", "auto"),
+                    req.get("allowed_langs"),
+                )
             elif cmd == "translate":
                 result = cmd_translate(req)
             else:

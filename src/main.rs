@@ -49,6 +49,13 @@ struct AppSettings {
     translation_provider: String, // "nemotron" | "ollama" | "whisper"
     ollama_host: String,
     ollama_model: String,
+    patient_language: String,     // patient side of conversation mode
+    conversation_mode: bool,      // two-way clinician<->patient routing
+    tts_enabled: bool,            // browser speaks translations aloud
+    privacy_mode: bool,           // no session/audio/transcript persistence
+    whisper_model: String,        // e.g. "small" | "large-v3-turbo"
+    whisper_device: String,       // "cpu" | "cuda"
+    use_speaker_direction: bool,  // run speaker-ID in conversation mode
 }
 
 impl Default for AppSettings {
@@ -63,6 +70,13 @@ impl Default for AppSettings {
             translation_provider: "nemotron".to_string(),
             ollama_host: "http://192.168.1.230:11433".to_string(),
             ollama_model: String::new(),
+            patient_language: "ms".to_string(),
+            conversation_mode: true,
+            tts_enabled: true,
+            privacy_mode: true,
+            whisper_model: "large-v3-turbo".to_string(),
+            whisper_device: "cpu".to_string(),
+            use_speaker_direction: false,
         }
     }
 }
@@ -86,6 +100,9 @@ struct TranscribeResponse {
     transcript: String,
     translation: String,
     detected_lang: String,
+    target_lang: String,
+    direction: String,
+    tts: bool,
     speaker_id: String,
     confidence: f64,
 }
@@ -144,10 +161,14 @@ async fn spawn_speaker_id_worker(
 
 async fn spawn_astr_worker(
     python_path: &str,
+    whisper_model: &str,
+    whisper_device: &str,
 ) -> Result<AstrWorker, Box<dyn std::error::Error + Send + Sync>> {
-    info!("Starting ASR+translate worker (loading Whisper model)...");
+    info!("Starting ASR+translate worker (loading Whisper model '{}' on {})...", whisper_model, whisper_device);
     let mut child = tokio::process::Command::new(python_path)
         .args(["scripts/asr_translate_worker.py"])
+        .env("WHISPER_MODEL", whisper_model)
+        .env("WHISPER_DEVICE", whisper_device)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit())
@@ -262,7 +283,11 @@ async fn main() {
         }
     };
 
-    let astr_worker = match spawn_astr_worker(python_path).await {
+    let astr_worker = match spawn_astr_worker(
+        python_path,
+        &settings_val.whisper_model,
+        &settings_val.whisper_device,
+    ).await {
         Ok(w) => w,
         Err(e) => {
             error!("Failed to start ASR+translate worker: {:?}", e);
@@ -315,7 +340,13 @@ async fn get_sessions_handler(
 
     let settings = state.settings.lock().await;
     let curated_folder = settings.curated_audio_folder.clone();
+    let privacy_mode = settings.privacy_mode;
     drop(settings);
+
+    // Privacy mode: nothing is persisted, so there is nothing to list
+    if privacy_mode {
+        return Json(sessions);
+    }
 
     if let Ok(entries) = std::fs::read_dir("data/sessions") {
         for entry in entries.flatten() {
@@ -391,30 +422,50 @@ async fn transcribe_handler(
         return Err((StatusCode::BAD_REQUEST, "Missing audio field".to_string()));
     }
 
+    // Get settings once
+    let (source_lang, settings_target_lang, api_key, provider, ollama_host, ollama_model,
+         conversation, patient_lang, tts_enabled, privacy_mode, use_speaker_direction) = {
+        let s = state.settings.lock().await;
+        (s.source_language.clone(), s.target_language.clone(), s.nemotron_api_key.clone(),
+         s.translation_provider.clone(), s.ollama_host.clone(), s.ollama_model.clone(),
+         s.conversation_mode, s.patient_language.clone(), s.tts_enabled, s.privacy_mode,
+         s.use_speaker_direction)
+    };
+
     let timestamp = Local::now().format("%Y-%m-%dT%H-%M-%S").to_string();
     let session_id = format!("{}_{}", timestamp, Uuid::new_v4());
-    let session_dir = format!("data/sessions/{}", session_id);
-    std::fs::create_dir_all(&session_dir)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let audio_path = format!("{}/audio.wav", session_dir);
+    // Privacy mode: flat temp file, deleted after processing — no session dir,
+    // no transcript/translation/speaker persistence.
+    let session_dir = format!("data/sessions/{}", session_id);
+    let audio_path = if privacy_mode {
+        std::fs::create_dir_all("data/sessions")
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        format!("data/sessions/rest_{}.wav", Uuid::new_v4())
+    } else {
+        std::fs::create_dir_all(&session_dir)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        format!("{}/audio.wav", session_dir)
+    };
     std::fs::write(&audio_path, &audio_bytes)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Get settings once
-    let (source_lang, target_lang, api_key, provider, ollama_host, ollama_model) = {
-        let s = state.settings.lock().await;
-        (s.source_language.clone(), s.target_language.clone(), s.nemotron_api_key.clone(),
-         s.translation_provider.clone(), s.ollama_host.clone(), s.ollama_model.clone())
-    };
-
     // Transcribe via faster-whisper worker
     let (transcript, detected_lang) = {
-        let req = serde_json::json!({
-            "cmd": "transcribe",
-            "audio_path": audio_path,
-            "source_lang": source_lang,
-        });
+        let req = if conversation {
+            serde_json::json!({
+                "cmd": "transcribe",
+                "audio_path": audio_path,
+                "source_lang": "auto",
+                "allowed_langs": ["en", patient_lang],
+            })
+        } else {
+            serde_json::json!({
+                "cmd": "transcribe",
+                "audio_path": audio_path,
+                "source_lang": source_lang,
+            })
+        };
         let mut astr = state.astr.lock().await;
         match astr.send(&format!("{}\n", req)).await {
             Ok(resp) => {
@@ -441,6 +492,17 @@ async fn transcribe_handler(
     };
 
     let transcript_trimmed = transcript.trim().to_string();
+
+    // Conversation mode: direction follows the detected language
+    let (target_lang, direction) = if conversation {
+        if detected_lang == "en" {
+            (patient_lang.clone(), "to_patient")
+        } else {
+            ("en".to_string(), "to_clinician")
+        }
+    } else {
+        (settings_target_lang.clone(), "")
+    };
 
     // Translate (provider-aware: nemotron/ollama/whisper)
     let should_translate = !transcript_trimmed.is_empty() && detected_lang != target_lang
@@ -475,15 +537,19 @@ async fn transcribe_handler(
         String::new()
     };
 
-    // Persist session files
-    let _ = std::fs::write(format!("{}/transcript.txt", session_dir), &transcript_trimmed);
-    let _ = std::fs::write(format!("{}/detected_lang.txt", session_dir), &detected_lang);
-    if !translation.is_empty() {
-        let _ = std::fs::write(format!("{}/translation.txt", session_dir), &translation);
+    // Persist session files (skipped entirely in privacy mode)
+    if !privacy_mode {
+        let _ = std::fs::write(format!("{}/transcript.txt", session_dir), &transcript_trimmed);
+        let _ = std::fs::write(format!("{}/detected_lang.txt", session_dir), &detected_lang);
+        if !translation.is_empty() {
+            let _ = std::fs::write(format!("{}/translation.txt", session_dir), &translation);
+        }
     }
 
-    // Speaker ID (runs against same audio file)
-    let (speaker_id, confidence) = {
+    // Speaker ID — skipped in conversation mode unless enabled as tiebreaker
+    let (speaker_id, confidence) = if conversation && !use_speaker_direction {
+        ("Unknown".to_string(), 0.0)
+    } else {
         let mut worker = state.speaker_id.lock().await;
         match worker.send(&format!("identify {}\n", audio_path)).await {
             Ok(resp) if resp.starts_with("IDENTIFIED:") => {
@@ -497,17 +563,25 @@ async fn transcribe_handler(
         }
     };
 
-    let _ = std::fs::write(format!("{}/speaker.txt", session_dir), &speaker_id);
-    let _ = std::fs::write(format!("{}/confidence.txt", session_dir), confidence.to_string());
-
-    info!("POST /api/transcribe -> session={} speaker={} lang={} confidence={:.4} transcript={:?}",
-        session_id, speaker_id, detected_lang, confidence, transcript_trimmed);
+    if privacy_mode {
+        let _ = std::fs::remove_file(&audio_path);
+        info!("POST /api/transcribe -> lang={} direction={} chars={}",
+            detected_lang, direction, transcript_trimmed.chars().count());
+    } else {
+        let _ = std::fs::write(format!("{}/speaker.txt", session_dir), &speaker_id);
+        let _ = std::fs::write(format!("{}/confidence.txt", session_dir), confidence.to_string());
+        info!("POST /api/transcribe -> session={} speaker={} lang={} confidence={:.4} transcript={:?}",
+            session_id, speaker_id, detected_lang, confidence, transcript_trimmed);
+    }
 
     Ok(Json(TranscribeResponse {
         session_id,
         transcript: transcript_trimmed,
+        tts: tts_enabled && !translation.is_empty(),
         translation,
         detected_lang,
+        target_lang,
+        direction: direction.to_string(),
         speaker_id,
         confidence,
     }))
@@ -700,6 +774,13 @@ async fn get_settings_handler(
         "translation_provider": settings.translation_provider,
         "ollama_host": settings.ollama_host,
         "ollama_model": settings.ollama_model,
+        "patient_language": settings.patient_language,
+        "conversation_mode": settings.conversation_mode,
+        "tts_enabled": settings.tts_enabled,
+        "privacy_mode": settings.privacy_mode,
+        "whisper_model": settings.whisper_model,
+        "whisper_device": settings.whisper_device,
+        "use_speaker_direction": settings.use_speaker_direction,
     }))
 }
 
@@ -721,16 +802,48 @@ async fn update_settings_handler(
     if let Some(v) = patch.get("nemotron_api_key").and_then(|v| v.as_str()) {
         settings.nemotron_api_key = v.to_string();
     }
-    let valid_langs = ["auto", "en", "zh", "ms", "ta", "ko"];
+    let valid_langs = ["auto", "en", "zh", "ms", "ta", "ko", "id", "yue", "my"];
     if let Some(v) = patch.get("source_language").and_then(|v| v.as_str()) {
         if valid_langs.contains(&v) {
             settings.source_language = v.to_string();
         }
     }
-    let valid_target_langs = ["en", "zh", "ms", "ta", "ko"];
+    let valid_target_langs = ["en", "zh", "ms", "ta", "ko", "id", "yue", "my"];
     if let Some(v) = patch.get("target_language").and_then(|v| v.as_str()) {
         if valid_target_langs.contains(&v) {
             settings.target_language = v.to_string();
+        }
+    }
+    // Patient side of conversation mode (clinician side is fixed to English)
+    let valid_patient_langs = ["zh", "ms", "ta", "ko", "id", "yue", "my"];
+    if let Some(v) = patch.get("patient_language").and_then(|v| v.as_str()) {
+        if valid_patient_langs.contains(&v) {
+            settings.patient_language = v.to_string();
+        }
+    }
+    if let Some(v) = patch.get("conversation_mode").and_then(|v| v.as_bool()) {
+        settings.conversation_mode = v;
+    }
+    if let Some(v) = patch.get("tts_enabled").and_then(|v| v.as_bool()) {
+        settings.tts_enabled = v;
+    }
+    if let Some(v) = patch.get("privacy_mode").and_then(|v| v.as_bool()) {
+        settings.privacy_mode = v;
+    }
+    if let Some(v) = patch.get("use_speaker_direction").and_then(|v| v.as_bool()) {
+        settings.use_speaker_direction = v;
+    }
+    // Whisper model/device take effect on next server restart (worker spawn)
+    let valid_whisper_models = ["small", "medium", "large-v3", "large-v3-turbo", "turbo"];
+    if let Some(v) = patch.get("whisper_model").and_then(|v| v.as_str()) {
+        if valid_whisper_models.contains(&v) {
+            settings.whisper_model = v.to_string();
+        }
+    }
+    let valid_whisper_devices = ["cpu", "cuda", "auto"];
+    if let Some(v) = patch.get("whisper_device").and_then(|v| v.as_str()) {
+        if valid_whisper_devices.contains(&v) {
+            settings.whisper_device = v.to_string();
         }
     }
     let valid_providers = ["nemotron", "ollama", "whisper"];
@@ -825,6 +938,14 @@ async fn ws_transcribe_handler(
 }
 
 async fn ws_transcribe_loop(mut socket: WebSocket, state: Arc<AppState>) {
+    // Per-connection conversation state, updatable via JSON config frames:
+    //   {"type":"config","patient_lang":"ms","conversation":true,"direction":"auto"}
+    // direction: "auto" | "to_patient" (force EN source) | "to_clinician" (force patient source)
+    let mut conn_patient_lang: Option<String> = None;
+    let mut conn_conversation: Option<bool> = None;
+    let mut conn_direction: String = "auto".to_string();
+    let valid_patient_langs = ["zh", "ms", "ta", "ko", "id", "yue", "my"];
+
     loop {
         let msg = match socket.recv().await {
             Some(Ok(m)) => m,
@@ -834,8 +955,36 @@ async fn ws_transcribe_loop(mut socket: WebSocket, state: Arc<AppState>) {
 
         let audio_bytes = match msg {
             Message::Binary(bytes) => bytes,
+            Message::Text(text) => {
+                if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                    if v["type"] == "config" {
+                        if let Some(pl) = v["patient_lang"].as_str() {
+                            if valid_patient_langs.contains(&pl) {
+                                conn_patient_lang = Some(pl.to_string());
+                            }
+                        }
+                        if let Some(c) = v["conversation"].as_bool() {
+                            conn_conversation = Some(c);
+                        }
+                        if let Some(d) = v["direction"].as_str() {
+                            if ["auto", "to_patient", "to_clinician"].contains(&d) {
+                                conn_direction = d.to_string();
+                            }
+                        }
+                        let _ = socket.send(Message::Text(
+                            serde_json::json!({
+                                "status": "ok", "type": "config_ack",
+                                "patient_lang": conn_patient_lang,
+                                "conversation": conn_conversation,
+                                "direction": conn_direction,
+                            }).to_string()
+                        )).await;
+                    }
+                }
+                continue;
+            }
             Message::Close(_) => break,
-            _ => continue, // ignore text, ping, pong
+            _ => continue, // ignore ping, pong
         };
 
         // Write audio to a flat temp file (no session directory)
@@ -851,18 +1000,48 @@ async fn ws_transcribe_loop(mut socket: WebSocket, state: Arc<AppState>) {
         }
 
         // Read settings once; drop lock immediately
-        let (source_lang, target_lang, api_key, provider, ollama_host, ollama_model) = {
+        let (source_lang, settings_target_lang, api_key, provider, ollama_host, ollama_model,
+             settings_conversation, settings_patient_lang, tts_enabled, privacy_mode,
+             use_speaker_direction) = {
             let s = state.settings.lock().await;
             (s.source_language.clone(), s.target_language.clone(), s.nemotron_api_key.clone(),
-             s.translation_provider.clone(), s.ollama_host.clone(), s.ollama_model.clone())
+             s.translation_provider.clone(), s.ollama_host.clone(), s.ollama_model.clone(),
+             s.conversation_mode, s.patient_language.clone(), s.tts_enabled, s.privacy_mode,
+             s.use_speaker_direction)
         };
 
+        let conversation = conn_conversation.unwrap_or(settings_conversation);
+        let patient_lang = conn_patient_lang.clone().unwrap_or(settings_patient_lang);
+
         // Transcribe — acquire and release the astr lock before any further awaits
-        let astr_req = serde_json::json!({
-            "cmd": "transcribe",
-            "audio_path": audio_path,
-            "source_lang": source_lang,
-        }).to_string();
+        let astr_req = if conversation {
+            match conn_direction.as_str() {
+                // Forced direction pins the source language directly
+                "to_patient" => serde_json::json!({
+                    "cmd": "transcribe",
+                    "audio_path": audio_path,
+                    "source_lang": "en",
+                }),
+                "to_clinician" => serde_json::json!({
+                    "cmd": "transcribe",
+                    "audio_path": audio_path,
+                    "source_lang": patient_lang,
+                }),
+                // Auto: detect, but constrained to the clinician/patient pair
+                _ => serde_json::json!({
+                    "cmd": "transcribe",
+                    "audio_path": audio_path,
+                    "source_lang": "auto",
+                    "allowed_langs": ["en", patient_lang],
+                }),
+            }
+        } else {
+            serde_json::json!({
+                "cmd": "transcribe",
+                "audio_path": audio_path,
+                "source_lang": source_lang,
+            })
+        }.to_string();
         let astr_resp = {
             let mut astr = state.astr.lock().await;
             astr.send(&format!("{}\n", astr_req)).await
@@ -904,6 +1083,19 @@ async fn ws_transcribe_loop(mut socket: WebSocket, state: Arc<AppState>) {
             }
         };
 
+        // Conversation mode: direction follows the detected language.
+        // Clinician speaks English -> translate to patient language; anything
+        // else is treated as the patient speaking -> translate to English.
+        let (target_lang, direction) = if conversation {
+            if detected_lang == "en" {
+                (patient_lang.clone(), "to_patient")
+            } else {
+                ("en".to_string(), "to_clinician")
+            }
+        } else {
+            (settings_target_lang.clone(), "")
+        };
+
         // Translate (provider-aware)
         let ws_should_translate = !transcript_trimmed.is_empty() && detected_lang != target_lang
             && match provider.as_str() {
@@ -940,20 +1132,25 @@ async fn ws_transcribe_loop(mut socket: WebSocket, state: Arc<AppState>) {
             String::new()
         };
 
-        // Speaker ID — acquire and release lock before cleanup
-        let spk_resp = {
-            let mut worker = state.speaker_id.lock().await;
-            worker.send(&format!("identify {}\n", audio_path)).await
-        };
-        let (speaker_id, confidence) = match spk_resp {
-            Ok(resp) if resp.starts_with("IDENTIFIED:") => {
-                let parts: Vec<&str> = resp.split(':').collect();
-                let speaker = parts.get(1).unwrap_or(&"Unknown").to_string();
-                let conf = parts.get(2).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                (speaker, conf)
+        // Speaker ID — skipped in conversation mode (saves ~0.5-1s per utterance)
+        // unless explicitly enabled as a direction tiebreaker
+        let (speaker_id, confidence) = if conversation && !use_speaker_direction {
+            ("Unknown".to_string(), 0.0)
+        } else {
+            let spk_resp = {
+                let mut worker = state.speaker_id.lock().await;
+                worker.send(&format!("identify {}\n", audio_path)).await
+            };
+            match spk_resp {
+                Ok(resp) if resp.starts_with("IDENTIFIED:") => {
+                    let parts: Vec<&str> = resp.split(':').collect();
+                    let speaker = parts.get(1).unwrap_or(&"Unknown").to_string();
+                    let conf = parts.get(2).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                    (speaker, conf)
+                }
+                Ok(resp) => { warn!("WS speaker ID unexpected: {}", resp); ("Unknown".to_string(), 0.0) }
+                Err(e) => { error!("WS speaker ID error: {}", e); ("Unknown".to_string(), 0.0) }
             }
-            Ok(resp) => { warn!("WS speaker ID unexpected: {}", resp); ("Unknown".to_string(), 0.0) }
-            Err(e) => { error!("WS speaker ID error: {}", e); ("Unknown".to_string(), 0.0) }
         };
 
         // Delete the temp WAV
@@ -965,6 +1162,9 @@ async fn ws_transcribe_loop(mut socket: WebSocket, state: Arc<AppState>) {
             "transcript": transcript_trimmed,
             "translation": translation,
             "detected_lang": detected_lang,
+            "target_lang": target_lang,
+            "direction": direction,
+            "tts": tts_enabled && !translation.is_empty(),
             "speaker_id": speaker_id,
             "confidence": confidence,
         }).to_string();
@@ -973,7 +1173,12 @@ async fn ws_transcribe_loop(mut socket: WebSocket, state: Arc<AppState>) {
             error!("WS send error: {}", e);
             break;
         }
-        info!("WS frame processed: speaker={} lang={} confidence={:.4} transcript={:?}",
-            speaker_id, detected_lang, confidence, transcript_trimmed);
+        if privacy_mode {
+            info!("WS frame processed: lang={} direction={} chars={}",
+                detected_lang, direction, transcript_trimmed.chars().count());
+        } else {
+            info!("WS frame processed: speaker={} lang={} confidence={:.4} transcript={:?}",
+                speaker_id, detected_lang, confidence, transcript_trimmed);
+        }
     }
 }

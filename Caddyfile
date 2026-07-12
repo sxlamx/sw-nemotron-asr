@@ -1,0 +1,14 @@
+# HTTPS reverse proxy for phone access on the LAN (mic capture + speech
+# synthesis require a secure context on mobile browsers).
+#
+# Usage:  caddy run
+# Then on the phone: https://<this-machine's-LAN-IP>  (install Caddy's local
+# root CA on the phone once: `caddy trust` exports it; see docs).
+{
+	local_certs
+}
+
+:443 {
+	tls internal
+	reverse_proxy 127.0.0.1:3007
+}

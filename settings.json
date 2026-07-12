@@ -4,5 +4,15 @@
   "max_enrollment_samples": 10,
   "nemotron_api_key": "",
   "source_language": "auto",
-  "target_language": "en"
+  "target_language": "en",
+  "translation_provider": "ollama",
+  "ollama_host": "http://127.0.0.1:11434",
+  "ollama_model": "qwen2.5:3b",
+  "patient_language": "ms",
+  "conversation_mode": true,
+  "tts_enabled": true,
+  "privacy_mode": true,
+  "whisper_model": "large-v3-turbo",
+  "whisper_device": "cuda",
+  "use_speaker_direction": false
 }

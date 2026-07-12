@@ -331,6 +331,10 @@ try:
     with urllib.request.urlopen(req, timeout=10) as r:
         login_html = r.read().decode()
     check("  login page loads publicly", "login-form" in login_html)
+    check("  PWA manifest linked", 'rel="manifest"' in html)
+    for asset in ["/manifest.json", "/sw.js", "/worklet/pcm-capture.js", "/icons/icon-192.png"]:
+        st = status_of(lambda a=asset: urllib.request.urlopen(f"{BASE}{a}", timeout=10))
+        check(f"  asset {asset} served", st == 200, str(st))
 except Exception as e:
     check("Page loads", False, str(e))
 

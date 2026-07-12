@@ -108,6 +108,15 @@ async function checkAuth() {
     return true;
 }
 
+// PWA: service worker for installability + shell resilience (needs HTTPS/localhost)
+if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js').catch((err) => {
+            console.warn('[PWA] Service worker registration failed:', err);
+        });
+    });
+}
+
 // Initial page load
 document.addEventListener('DOMContentLoaded', async () => {
     if (!(await checkAuth())) return;
@@ -958,10 +967,29 @@ function vadReset() {
     silenceStart = null;
 }
 
-// Send a Float32 samples array as a WAV binary WS frame
+// Actual capture rate of the running AudioContext. iOS ignores a requested
+// 16 kHz, so we capture at the native rate and resample when sending.
+let captureSampleRate = 16000;
+
+function resampleTo16k(samples, fromRate) {
+    if (fromRate === 16000) return samples;
+    const ratio = fromRate / 16000;
+    const outLen = Math.floor(samples.length / ratio);
+    const out = new Array(outLen);
+    for (let i = 0; i < outLen; i++) {
+        const pos = i * ratio;
+        const i0 = Math.floor(pos);
+        const i1 = Math.min(i0 + 1, samples.length - 1);
+        const frac = pos - i0;
+        out[i] = samples[i0] * (1 - frac) + samples[i1] * frac;
+    }
+    return out;
+}
+
+// Send a Float32 samples array as a 16 kHz WAV binary WS frame
 async function sendUtteranceSamples(samples) {
     if (!samples.length) return;
-    const blob = bufferToWav(samples);
+    const blob = bufferToWav(resampleTo16k(samples, captureSampleRate));
     const arrayBuffer = await blob.arrayBuffer();
     if (ws && ws.readyState === WebSocket.OPEN) {
         wsPendingResponse = true;
@@ -973,64 +1001,98 @@ async function sendUtteranceSamples(samples) {
 
 // ─── Audio Recording ──────────────────────────────────────────────────────────
 
+// Shared VAD/segmentation for both capture paths (AudioWorklet + fallback)
+function handleCaptureSamples(samples) {
+    if (!isRecording) return;
+    // Gate the mic while TTS is playing (+tail) so the device speaker
+    // doesn't re-trigger transcription of its own translated speech
+    if (window.TTS && TTS.isPlaying()) return;
+
+    // Energy VAD
+    let sum = 0;
+    for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
+    const rms = Math.sqrt(sum / samples.length);
+    const isSpeech = rms > VAD_THRESHOLD;
+
+    if (isSpeech) {
+        if (vadState === 'silence') {
+            speechStart = Date.now();
+            vadState = 'speech';
+            recStatus.innerText = 'Speaking...';
+            recStatus.className = 'status-badge recording';
+        }
+        for (let i = 0; i < samples.length; i++) utteranceBuf.push(samples[i]);
+        silenceStart = null;
+    } else {
+        if (vadState === 'speech') {
+            for (let i = 0; i < samples.length; i++) utteranceBuf.push(samples[i]); // trailing silence
+            if (!silenceStart) silenceStart = Date.now();
+
+            const silence = Date.now() - silenceStart;
+            const utteranceDur = Date.now() - speechStart;
+
+            if (silence >= SILENCE_GAP_MS && utteranceDur >= MIN_UTTERANCE_MS) {
+                sendUtteranceSamples(utteranceBuf.slice());
+                vadReset();
+                recStatus.innerText = 'Listening...';
+                recStatus.className = 'status-badge idle';
+            }
+        }
+    }
+
+    // Force-send if utterance runs too long (avoids memory growth)
+    if (utteranceBuf.length >= MAX_UTTERANCE_MS / 1000 * captureSampleRate) {
+        sendUtteranceSamples(utteranceBuf.slice());
+        vadReset();
+    }
+}
+
+let workletNode = null;
+let wakeLock = null;
+
+async function requestWakeLock() {
+    try {
+        if ('wakeLock' in navigator) {
+            wakeLock = await navigator.wakeLock.request('screen');
+        }
+    } catch (err) { /* not critical — e.g. low battery mode */ }
+}
+
 async function startAudioRecording() {
     try {
         vadReset();
-        audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+        // Native sample rate: iOS ignores a requested 16 kHz; we resample on send
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        captureSampleRate = audioCtx.sampleRate;
         micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
         sourceNode  = audioCtx.createMediaStreamSource(micStream);
         analyserNode = audioCtx.createAnalyser();
-        scriptNode  = audioCtx.createScriptProcessor(4096, 1, 1);
-
-        scriptNode.onaudioprocess = (e) => {
-            if (!isRecording) return;
-            // Gate the mic while TTS is playing (+tail) so the device speaker
-            // doesn't re-trigger transcription of its own translated speech
-            if (window.TTS && TTS.isPlaying()) return;
-            const samples = Array.from(e.inputBuffer.getChannelData(0));
-
-            // Energy VAD
-            const rms = Math.sqrt(samples.reduce((s, x) => s + x * x, 0) / samples.length);
-            const isSpeech = rms > VAD_THRESHOLD;
-
-            if (isSpeech) {
-                if (vadState === 'silence') {
-                    speechStart = Date.now();
-                    vadState = 'speech';
-                    recStatus.innerText = 'Speaking...';
-                    recStatus.className = 'status-badge recording';
-                }
-                utteranceBuf.push(...samples);
-                silenceStart = null;
-            } else {
-                if (vadState === 'speech') {
-                    utteranceBuf.push(...samples); // include trailing silence
-                    if (!silenceStart) silenceStart = Date.now();
-
-                    const silence = Date.now() - silenceStart;
-                    const utteranceDur = Date.now() - speechStart;
-
-                    if (silence >= SILENCE_GAP_MS && utteranceDur >= MIN_UTTERANCE_MS) {
-                        sendUtteranceSamples(utteranceBuf.slice());
-                        vadReset();
-                        recStatus.innerText = 'Listening...';
-                        recStatus.className = 'status-badge idle';
-                    }
-                }
-            }
-
-            // Force-send if utterance runs too long (avoids memory growth)
-            if (utteranceBuf.length >= MAX_UTTERANCE_MS / 1000 * 16000) {
-                sendUtteranceSamples(utteranceBuf.slice());
-                vadReset();
-            }
-        };
-
         sourceNode.connect(analyserNode);
-        sourceNode.connect(scriptNode);
-        scriptNode.connect(audioCtx.destination);
 
+        // Preferred path: AudioWorklet (ScriptProcessorNode is deprecated)
+        let usingWorklet = false;
+        if (audioCtx.audioWorklet) {
+            try {
+                await audioCtx.audioWorklet.addModule('/worklet/pcm-capture.js');
+                workletNode = new AudioWorkletNode(audioCtx, 'pcm-capture');
+                workletNode.port.onmessage = (e) => handleCaptureSamples(e.data);
+                sourceNode.connect(workletNode);
+                usingWorklet = true;
+                console.log('[Audio] AudioWorklet capture at', captureSampleRate, 'Hz');
+            } catch (err) {
+                console.warn('[Audio] AudioWorklet unavailable, falling back:', err);
+            }
+        }
+        if (!usingWorklet) {
+            scriptNode = audioCtx.createScriptProcessor(4096, 1, 1);
+            scriptNode.onaudioprocess = (e) => handleCaptureSamples(e.inputBuffer.getChannelData(0));
+            sourceNode.connect(scriptNode);
+            scriptNode.connect(audioCtx.destination);
+            console.log('[Audio] ScriptProcessor capture at', captureSampleRate, 'Hz');
+        }
+
+        requestWakeLock();
         isRecording = true;
         startVisualizer();
         startTimer();
@@ -1054,10 +1116,12 @@ async function stopAudioRecording() {
     vadReset();
 
     if (animationFrameId) cancelAnimationFrame(animationFrameId);
+    if (workletNode) { workletNode.port.onmessage = null; workletNode.disconnect(); workletNode = null; }
     if (scriptNode)  { scriptNode.disconnect();  scriptNode = null; }
     if (sourceNode)  { sourceNode.disconnect();  sourceNode = null; }
     if (micStream)   { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
     if (audioCtx)    { await audioCtx.close();   audioCtx = null; }
+    if (wakeLock)    { wakeLock.release().catch(() => {}); wakeLock = null; }
 
     drawVisualizerIdle();
 }
@@ -1168,6 +1232,7 @@ function displayResult(data) {
 
 let isEnrollRecording = false;
 let enrollAudioBuffer = [];
+let enrollCaptureRate = 16000;
 let enrollAudioCtx = null;
 let enrollMicStream = null;
 let enrollSourceNode = null;
@@ -1203,7 +1268,8 @@ enrollBtn.addEventListener('click', async () => {
 
         try {
             enrollAudioBuffer = [];
-            enrollAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+            enrollAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            enrollCaptureRate = enrollAudioCtx.sampleRate;
             enrollMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
             enrollSourceNode = enrollAudioCtx.createMediaStreamSource(enrollMicStream);
@@ -1247,7 +1313,7 @@ enrollBtn.addEventListener('click', async () => {
             enrollAudioCtx = null;
         }
 
-        const audioBlob = bufferToWav(enrollAudioBuffer);
+        const audioBlob = bufferToWav(resampleTo16k(enrollAudioBuffer, enrollCaptureRate));
         enrollAudioBuffer = [];
 
         await registerSpeakerProfile(sId, sName, sAliases, audioBlob);

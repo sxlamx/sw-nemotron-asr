@@ -102,6 +102,9 @@ async function checkAuth() {
             if (currentUser.role !== 'admin') {
                 const saveBtn = document.getElementById('save-settings-btn');
                 if (saveBtn) { saveBtn.disabled = true; saveBtn.title = 'Admin role required'; }
+            } else {
+                const usersCard = document.getElementById('users-card');
+                if (usersCard) { usersCard.style.display = ''; fetchUsers(); }
             }
         }
     } catch (err) { /* offline — let the page load */ }
@@ -429,6 +432,80 @@ async function addGlossaryTerm() {
     }
     setTimeout(() => { status.textContent = ''; }, 3000);
 }
+
+// ─── User Management (admin only) ────────────────────────────────────────────
+
+async function fetchUsers() {
+    const tbody = document.getElementById('users-table-body');
+    if (!tbody) return;
+    try {
+        const res = await fetch('/api/users');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const users = await res.json();
+        tbody.innerHTML = '';
+        users.forEach(u => {
+            const isSelf = currentUser && u.username === currentUser.username;
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td style="font-family:var(--font-mono);">${escapeHtml(u.username)}${isSelf ? ' <span style="color:var(--text-muted); font-size:0.75rem;">(you)</span>' : ''}</td>
+                <td>${escapeHtml(u.role)}</td>
+                <td class="table-actions">
+                    <button type="button" class="action-btn" title="Delete account">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                    </button>
+                </td>
+            `;
+            row.querySelector('.action-btn').addEventListener('click', async () => {
+                if (!confirm(`Delete account "${u.username}"?`)) return;
+                const res2 = await fetch(`/api/users/${encodeURIComponent(u.username)}`, { method: 'DELETE' });
+                if (res2.ok) {
+                    if (isSelf) { location.href = '/login.html'; return; }
+                    fetchUsers();
+                } else {
+                    alert('Failed: ' + await res2.text());
+                }
+            });
+            tbody.appendChild(row);
+        });
+    } catch (err) {
+        tbody.innerHTML = `<tr><td colspan="3" style="text-align:center; color:var(--text-muted);">Could not load accounts.</td></tr>`;
+    }
+}
+
+async function addUser() {
+    const status = document.getElementById('users-status');
+    const username = document.getElementById('user-new-name').value.trim();
+    const password = document.getElementById('user-new-password').value;
+    const role = document.getElementById('user-new-role').value;
+    if (!username || password.length < 8) {
+        status.textContent = 'Username and a password of at least 8 characters are required.';
+        setTimeout(() => { status.textContent = ''; }, 3000);
+        return;
+    }
+    try {
+        const res = await fetch('/api/users', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password, role }),
+        });
+        if (res.ok) {
+            status.textContent = `Saved account "${username}".`;
+            document.getElementById('user-new-name').value = '';
+            document.getElementById('user-new-password').value = '';
+            fetchUsers();
+        } else {
+            status.textContent = 'Failed: ' + await res.text();
+        }
+    } catch (err) {
+        status.textContent = 'Network error.';
+    }
+    setTimeout(() => { status.textContent = ''; }, 3000);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const userAddBtn = document.getElementById('user-add-btn');
+    if (userAddBtn) userAddBtn.addEventListener('click', addUser);
+});
 
 document.addEventListener('DOMContentLoaded', () => {
     fetchGlossary();

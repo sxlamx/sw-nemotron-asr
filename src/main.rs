@@ -179,7 +179,8 @@ async fn auth_middleware(
     };
 
     let admin_only = (method == Method::POST && path == "/api/settings")
-        || (method == Method::DELETE && path.starts_with("/api/glossary/"));
+        || (method == Method::DELETE && path.starts_with("/api/glossary/"))
+        || path.starts_with("/api/users");
     if admin_only && session.role != "admin" {
         return (StatusCode::FORBIDDEN, "Admin role required").into_response();
     }
@@ -605,6 +606,8 @@ async fn main() {
         .route("/api/login", post(login_handler))
         .route("/api/logout", post(logout_handler))
         .route("/api/me", get(me_handler))
+        .route("/api/users", get(get_users_handler).post(add_user_handler))
+        .route("/api/users/:username", axum::routing::delete(delete_user_handler))
         .route("/ws/transcribe", get(ws_transcribe_handler))
         .route("/api/transcribe", post(transcribe_handler))
         .route("/api/speakers/enroll", post(enroll_handler))
@@ -1003,6 +1006,104 @@ async fn update_aliases_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    Ok(StatusCode::OK)
+}
+
+// ── User management (admin-only via middleware) ──────────────────────────────
+
+async fn get_users_handler(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let users = state.users.lock().await;
+    let listed: Vec<Value> = users.as_array().map(|arr| {
+        arr.iter().map(|u| serde_json::json!({
+            "username": u["username"],
+            "role": u["role"],
+        })).collect()
+    }).unwrap_or_default();
+    Json(Value::Array(listed))
+}
+
+async fn add_user_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
+    let username = body["username"].as_str().unwrap_or("").trim().to_lowercase();
+    let password = body["password"].as_str().unwrap_or("");
+    let role = body["role"].as_str().unwrap_or("clinician");
+    if username.is_empty() || !username.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        return Err((StatusCode::BAD_REQUEST,
+            "username may only contain alphanumeric characters, hyphens, underscores".to_string()));
+    }
+    if password.len() < 8 {
+        return Err((StatusCode::BAD_REQUEST, "password must be at least 8 characters".to_string()));
+    }
+    if !["admin", "clinician"].contains(&role) {
+        return Err((StatusCode::BAD_REQUEST, "role must be 'admin' or 'clinician'".to_string()));
+    }
+    let salt = SaltString::generate(&mut OsRng);
+    let hash = argon2::Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .to_string();
+
+    let mut users = state.users.lock().await;
+    // Guard: don't let an update demote the only admin
+    if role != "admin" {
+        let is_last_admin = users.as_array().map(|arr| {
+            arr.iter().any(|u| u["username"].as_str() == Some(username.as_str())
+                && u["role"].as_str() == Some("admin"))
+            && arr.iter().filter(|u| u["role"].as_str() == Some("admin")).count() == 1
+        }).unwrap_or(false);
+        if is_last_admin {
+            return Err((StatusCode::BAD_REQUEST, "cannot demote the only admin account".to_string()));
+        }
+    }
+    if let Some(arr) = users.as_array_mut() {
+        arr.retain(|u| u["username"].as_str() != Some(username.as_str()));
+        arr.push(serde_json::json!({
+            "username": username,
+            "password_hash": hash,
+            "role": role,
+        }));
+    }
+    save_json_array(USERS_PATH, &users);
+    drop(users);
+    // Password/role changed — invalidate any live sessions for this user
+    state.tokens.lock().await.retain(|_, s| s.username != username);
+    info!("User account created/updated: {} ({})", username, role);
+    Ok(Json(serde_json::json!({"username": username, "role": role})))
+}
+
+async fn delete_user_handler(
+    State(state): State<Arc<AppState>>,
+    Path(username): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let username = username.trim().to_lowercase();
+    let mut users = state.users.lock().await;
+    let arr_len = |v: &Value| v.as_array().map(|a| a.len()).unwrap_or(0);
+    let is_admin = users.as_array().map(|arr| {
+        arr.iter().any(|u| u["username"].as_str() == Some(username.as_str())
+            && u["role"].as_str() == Some("admin"))
+    }).unwrap_or(false);
+    let admin_count = users.as_array().map(|arr| {
+        arr.iter().filter(|u| u["role"].as_str() == Some("admin")).count()
+    }).unwrap_or(0);
+    if is_admin && admin_count <= 1 {
+        return Err((StatusCode::BAD_REQUEST, "cannot delete the only admin account".to_string()));
+    }
+    let before = arr_len(&users);
+    if let Some(arr) = users.as_array_mut() {
+        arr.retain(|u| u["username"].as_str() != Some(username.as_str()));
+    }
+    if arr_len(&users) == before {
+        return Err((StatusCode::NOT_FOUND, "user not found".to_string()));
+    }
+    save_json_array(USERS_PATH, &users);
+    drop(users);
+    state.tokens.lock().await.retain(|_, s| s.username != username);
+    info!("User account deleted: {}", username);
     Ok(StatusCode::OK)
 }
 

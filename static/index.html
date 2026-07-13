@@ -1456,6 +1456,45 @@
             </div>
         </div>
 
+        <!-- User Accounts Card (admin only — shown by app.js) -->
+        <div class="card" style="margin-bottom: 2rem; display:none;" id="users-card">
+            <h2>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M19 8v6"></path><path d="M22 11h-6"></path></svg>
+                User Accounts
+            </h2>
+            <p style="font-size:0.82rem; color:var(--text-muted); margin:0.5rem 0 1rem;">
+                Clinicians can use the app, add glossary terms, and submit corrections.
+                Admins additionally manage settings, users, and glossary deletion.
+            </p>
+            <div class="glossary-form-grid" style="grid-template-columns: 1fr 1fr 0.8fr auto;">
+                <div class="form-group" style="margin-bottom:0;">
+                    <label for="user-new-name">Username</label>
+                    <input type="text" id="user-new-name" class="form-control" placeholder="e.g. jsmith" autocomplete="off">
+                </div>
+                <div class="form-group" style="margin-bottom:0;">
+                    <label for="user-new-password">Password (min 8 chars)</label>
+                    <input type="password" id="user-new-password" class="form-control" autocomplete="new-password">
+                </div>
+                <div class="form-group" style="margin-bottom:0;">
+                    <label for="user-new-role">Role</label>
+                    <select id="user-new-role" class="form-control">
+                        <option value="clinician">Clinician</option>
+                        <option value="admin">Admin</option>
+                    </select>
+                </div>
+                <button type="button" class="btn btn-primary" id="user-add-btn" style="white-space:nowrap;">Add / Update</button>
+            </div>
+            <div id="users-status" style="font-size:0.82rem; color:var(--text-muted); font-family:var(--font-mono); min-height:1.2em; margin-bottom:0.5rem;"></div>
+            <div class="recordings-table-container">
+                <table class="recordings-table">
+                    <thead>
+                        <tr><th>Username</th><th>Role</th><th>Actions</th></tr>
+                    </thead>
+                    <tbody id="users-table-body"></tbody>
+                </table>
+            </div>
+        </div>
+
         <!-- Settings Card -->
         <div class="card">
             <h2>

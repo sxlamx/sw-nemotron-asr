@@ -20,9 +20,11 @@ All five phases of the approved implementation plan
 | 5. Docs: data architecture, telehealth, roadmap, demo runbook | `6a36440` | ✅ Done |
 | OIP proposal draft | `0cbed11` | ✅ Drafted (placeholders pending) |
 
-**Verification:** `python test_e2e.py` against a running server = **76/76 checks**
-(settings, auth/roles incl. WS cookie refusal, conversation direction routing,
-glossary CRUD + correction-applied-on-repeat, privacy no-persistence, PWA assets).
+**Verification:** `python test_e2e.py` against a running server = **85/85 checks**
+(settings, auth/roles incl. WS cookie refusal, user-account CRUD + last-admin
+guard, conversation direction routing, glossary CRUD + correction-applied-on-
+repeat, privacy no-persistence, PWA assets). Note: run the suite against a
+*warm* server — the very first utterance after startup can time out checks.
 
 **Measured performance (dev machine, RTX 3050):** ~1.1 s ASR (whisper
 large-v3-turbo, CUDA) → ~1.9–3 s end-of-speech to translated text incl. local
@@ -80,9 +82,10 @@ python test_e2e.py          # 76-check verification (needs running server)
    MODULARIZE'd for ms/id/ta/yue/my, serve under `static/tts/`, implement the
    `SherpaWasmProvider.speak()` loader in `static/tts.js`.
 6. **Nice-to-haves not started:** Silero-VAD (WASM) replacing energy VAD;
-   user-management UI for admin (accounts are JSON-file edited today);
    LLM-assisted extraction of glossary entries from corrections; rate
    limiting / audit logging (listed in data-architecture backlog).
+   ~~User-management UI~~ — done 2026-07-13: admin-only User Accounts card
+   + `/api/users` CRUD (argon2, last-admin guard, session revocation).
 
 ## 5. Key file map (for orientation after a break)
 

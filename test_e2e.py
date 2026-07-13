@@ -90,6 +90,34 @@ if auth_enabled:
     check("Admin can write settings",
           status_of(lambda: post_json("/api/settings", {}, cookie=admin_cookie)) == 200)
     COOKIE = admin_cookie  # rest of the suite runs as admin
+
+    # ── User management (admin-only) ──
+    check("Clinician cannot list users (403)",
+          status_of(lambda: get("/api/users", cookie=clinician_cookie)) == 403)
+    users = get("/api/users")
+    check("Admin lists users (no password hashes)",
+          isinstance(users, list) and users and "password_hash" not in users[0],
+          str(users))
+    st = status_of(lambda: post_json("/api/users",
+        {"username": "e2e-temp", "password": "temp-pass-123", "role": "clinician"}))
+    check("Admin creates account", st == 200, str(st))
+    st, temp_cookie = login("e2e-temp", "temp-pass-123")
+    check("New account can log in", st == 200 and temp_cookie, str(st))
+    check("Short password rejected (400)",
+          status_of(lambda: post_json("/api/users",
+              {"username": "e2e-temp2", "password": "short", "role": "clinician"})) == 400)
+    def _delete_user(name, cookie=None):
+        req = urllib.request.Request(f"{BASE}/api/users/{name}", method="DELETE",
+            headers={"Cookie": cookie} if cookie else _headers())
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status
+    check("Clinician cannot delete accounts (403)",
+          status_of(lambda: _delete_user("e2e-temp", cookie=clinician_cookie)) == 403)
+    check("Admin deletes account", status_of(lambda: _delete_user("e2e-temp")) == 200)
+    check("Deleted account's session is revoked",
+          status_of(lambda: get("/api/settings", cookie=temp_cookie)) == 401)
+    check("Cannot delete the only admin (400)",
+          status_of(lambda: _delete_user("admin")) == 400)
 else:
     print("  [SKIP] auth_enabled=false — skipping auth checks")
 

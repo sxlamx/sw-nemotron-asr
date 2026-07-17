@@ -251,6 +251,21 @@ function updateTTSVoiceNote() {
     }, 500);
 }
 
+// Muted, centered note in the conversation log — used so every utterance
+// produces visible feedback: silence is never ambiguous.
+function renderSystemNote(text, kind) {
+    const wrap = document.getElementById('convo-log-wrap');
+    const log = document.getElementById('convo-log');
+    if (!wrap || !log) return;
+    wrap.classList.remove('hidden');
+    const note = document.createElement('div');
+    note.className = `convo-note${kind === 'warn' ? ' convo-note-warn' : ''}`;
+    note.textContent = text;
+    log.appendChild(note);
+    while (log.children.length > 100) log.removeChild(log.firstChild);
+    log.scrollTop = log.scrollHeight;
+}
+
 function renderConversationBubble(data) {
     const wrap = document.getElementById('convo-log-wrap');
     const log = document.getElementById('convo-log');
@@ -606,6 +621,12 @@ function connectWebSocket() {
         ws.onopen = () => {
             console.log('[WS] Connected to', wsUrl);
             sendWSConfig();
+            // Recovered mid-session — tell the user the mic is live again
+            if (isRecording) {
+                renderSystemNote('✓ Reconnected — listening again.');
+                recStatus.innerText = 'Listening...';
+                recStatus.className = 'status-badge idle';
+            }
         };
 
         ws.onmessage = (event) => {
@@ -616,9 +637,11 @@ function connectWebSocket() {
                     return;
                 }
                 wsPendingResponse = false;
+                clearResponseWatchdog();
                 displayLiveResult(data);
             } catch (err) {
                 wsPendingResponse = false;
+                clearResponseWatchdog();
                 console.error('[WS] Failed to parse message:', err, event.data);
             }
         };
@@ -629,9 +652,16 @@ function connectWebSocket() {
 
         ws.onclose = (event) => {
             console.log('[WS] Connection closed (code:', event.code, '). Reconnecting in 3s...');
+            clearResponseWatchdog();
             if (wsPendingResponse) {
                 wsPendingResponse = false;
-                resetRecordUI();
+                if (!isRecording) resetRecordUI();
+            }
+            // Keep the user informed while the mic is still hot
+            if (isRecording) {
+                renderSystemNote('⚠ Connection to server lost — reconnecting…', 'warn');
+                recStatus.innerText = 'Reconnecting...';
+                recStatus.className = 'status-badge processing';
             }
             ws = null;
             wsReconnectTimer = setTimeout(connectWebSocket, 3000);
@@ -690,6 +720,12 @@ function displayLiveResult(data) {
         recStatus.className = 'status-badge idle';
     }
 
+    // Error frames: surface visibly in conversation mode (previously silent)
+    if (data.status === 'error' && conversationMode) {
+        renderSystemNote(`⚠ ${data.message || 'Processing failed'}`, 'warn');
+        return;
+    }
+
     // Conversation mode: chat bubble + spoken translation, no classic panels
     if (data.direction === 'to_patient' || data.direction === 'to_clinician') {
         if (data.transcript) {
@@ -698,6 +734,10 @@ function displayLiveResult(data) {
             if (data.tts && ttsEnabled && window.TTS && data.translation) {
                 TTS.speak(data.translation, data.target_lang);
             }
+        } else {
+            // Whisper heard audio but recognized no speech — say so instead of
+            // rendering nothing (looks like a hang otherwise)
+            renderSystemNote('🔇 Heard audio but no speech was recognized — check mic distance/volume.');
         }
         lastCapture = {
             text: data.transcript || '',
@@ -1063,6 +1103,25 @@ function resampleTo16k(samples, fromRate) {
     return out;
 }
 
+// Watchdog: if a sent utterance gets no reply in this window, tell the user
+// the server is stalled instead of leaving the UI silent.
+const RESPONSE_WATCHDOG_MS = 30000;
+let responseWatchdog = null;
+
+function armResponseWatchdog() {
+    if (responseWatchdog) clearTimeout(responseWatchdog);
+    responseWatchdog = setTimeout(() => {
+        responseWatchdog = null;
+        renderSystemNote('⏳ No response from the server for 30s — it may be overloaded or stalled. Check the server window.', 'warn');
+        recStatus.innerText = 'Stalled?';
+        recStatus.className = 'status-badge processing';
+    }, RESPONSE_WATCHDOG_MS);
+}
+
+function clearResponseWatchdog() {
+    if (responseWatchdog) { clearTimeout(responseWatchdog); responseWatchdog = null; }
+}
+
 // Send a Float32 samples array as a 16 kHz WAV binary WS frame
 async function sendUtteranceSamples(samples) {
     if (!samples.length) return;
@@ -1071,7 +1130,13 @@ async function sendUtteranceSamples(samples) {
     if (ws && ws.readyState === WebSocket.OPEN) {
         wsPendingResponse = true;
         ws.send(arrayBuffer);
+        armResponseWatchdog();
         recStatus.innerText = 'Processing...';
+        recStatus.className = 'status-badge processing';
+    } else {
+        // Previously a silent drop — now the user is told the utterance was lost
+        renderSystemNote('⚠ Connection lost — that utterance was not translated. Reconnecting…', 'warn');
+        recStatus.innerText = 'Reconnecting...';
         recStatus.className = 'status-badge processing';
     }
 }
